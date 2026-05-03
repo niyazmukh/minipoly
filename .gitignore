@@ -1,0 +1,30 @@
+# secrets / local env
+.env
+.env.*
+*.pem
+*.key
+*.crt
+
+# runtime state and logs
+state/
+calibration_data/
+*.log
+*.pid
+
+# python caches and test temp
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.tmp_pytest/
+.tmp*/
+tmp/
+.pytest-tmp*/
+.pytest-*/
+pytest-cache-files*/
+.claude/
+
+# graphify transient cache
+graphify-out/cache/
+graphify-out/.graphify_*
+graphify-out/.needs_update
+graphify-out/cost.json
