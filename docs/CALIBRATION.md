@@ -4,6 +4,19 @@
 **Audience:** anyone fitting, evaluating, or signing off on a calibrated
 `signal_model.json` artifact.
 
+> **2026-05-04 update.** The runtime now uses a Brownian barrier-cross
+> probability inside `signal_decision.decide_buy`:
+> `P_yes = Phi((microprice − strike + alpha·OFI + beta·imbalance·sigma)
+>              / (sigma_scale · sigma_px · sqrt(tte_s)))`.
+> The strike is anchored once per market rotation from the median Binance
+> microprice over `[slug_ts, slug_ts + 0.3 s]`, immutable until the next
+> rotation. `BasisEstimator` is telemetry-only and no longer adjusts the
+> threshold. Tunables are exposed as `MINIMAL_PROB_*` env vars (see
+> `docs/README.md`). Defaults are intentionally conservative: an unfitted
+> deployment will trade *less* often than the legacy heuristic. Calibration
+> below should fit `prob_alpha_ofi`, `prob_beta_imb`, `prob_sigma_scale` from
+> logged `binance_signal_decision` events plus settled outcomes.
+
 This document defines the protocol that turns the heuristic signal stack in
 `binance_signal_engine.py` + `signal_decision.py` into a measured, audited
 parameter set. The runtime consumes the resulting JSON via

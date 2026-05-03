@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import logging
+from collections import deque
 from decimal import Decimal
 from typing import Any, Callable, Protocol
 
@@ -13,10 +15,27 @@ from runtime_state import MinimalMarket, MinimalRuntimeState
 from signal_decision import SignalDecision, SignalDecisionConfig, decide_buy
 
 
+# Window past slug_ts (microseconds) over which Binance microprice samples are
+# averaged to anchor the per-market strike. The user-specified design uses a
+# 0.3s window starting at the market slug timestamp.
+ANCHOR_WINDOW_END_US = 300_000
+
+# How long the orchestrator retains Binance ticks for retro-anchor
+# reconstruction. Must comfortably exceed ANCHOR_WINDOW_END_US plus the
+# expected gap between slug_ts and arrival of the gamma context event
+# (a few seconds in practice).
+ANCHOR_BUFFER_HORIZON_US = 10_000_000
+
+
 CONTEXT_EVENT_TYPE = "minimal_market_context"
 INACTIVE_EVENT_TYPE = "minimal_market_inactive"
 
 _DEC_TWO = Decimal("2")
+_LOG = logging.getLogger(__name__)
+
+
+def _result_attempted_submit(result: Any) -> bool:
+    return int(getattr(result, "latency_ns", 0) or 0) > 0
 
 
 class _Armory(Protocol):
@@ -37,9 +56,18 @@ class _HotPath(Protocol):
     def disarm_all(self) -> None:
         ...
 
+    def disarm(self, signal: str) -> None:
+        ...
+
 
 class _ExitArmory(Protocol):
     async def arm_exit(self, decision: ExitDecision, *, quote_ts_ns: int) -> bool:
+        ...
+
+    def prepare_exit(self, decision: ExitDecision, *, quote_ts_ns: int) -> bool:
+        ...
+
+    def reset(self) -> None:
         ...
 
 
@@ -58,6 +86,9 @@ class MinimalBotOrchestrator:
         "_polymarket_strike",
         "_exit_task",
         "_exit_dirty",
+        "_last_signal_status_ns",
+        "_anchor_buffer",
+        "_pending_anchor_slug_ts",
     )
 
     def __init__(
@@ -84,6 +115,9 @@ class MinimalBotOrchestrator:
         self._polymarket_strike: float = 0.0
         self._exit_task: asyncio.Task[None] | None = None
         self._exit_dirty: bool = False
+        self._last_signal_status_ns = 0
+        self._anchor_buffer: deque[tuple[int, float]] = deque()
+        self._pending_anchor_slug_ts: int = 0
 
     def configure_exit_policy(
         self,
@@ -96,6 +130,7 @@ class MinimalBotOrchestrator:
         self._exit_armory = exit_armory
         self._tracker = tracker
         self._sync_position_from_tracker()
+        self._prepare_exit_from_state()
 
     async def on_market_event(self, event: dict[str, Any]) -> bool:
         et = str(event.get("event_type") or event.get("eventType") or event.get("type") or "").strip().lower()
@@ -105,10 +140,14 @@ class MinimalBotOrchestrator:
         if et == INACTIVE_EVENT_TYPE:
             self._apply_market_inactive(event)
             return True
-        changed = await apply_market_event(event, self.state, self._armory)
+        arm_entries = self._entry_allowed()
+        if not arm_entries:
+            self._disarm_entry_templates()
+        changed = await apply_market_event(event, self.state, self._armory, arm_entries=arm_entries)
         if changed:
             self._sync_hot_path_exposure_scope()
             self._update_basis_from_state()
+            self._prepare_exit_from_state()
         return changed
 
     async def on_user_event(self, event: dict[str, Any]) -> bool:
@@ -121,6 +160,7 @@ class MinimalBotOrchestrator:
             if isinstance(changed, TradeState):
                 self._sync_position_from_tracker(changed.asset_id)
                 if changed.side == "BUY" and changed.applied:
+                    self._prepare_exit_from_state()
                     # Schedule exit evaluation off the user-WS recv loop. The
                     # signing+HTTP cost of arm_exit must not block dispatch
                     # of subsequent user events. Single-flight: if an exit
@@ -165,9 +205,18 @@ class MinimalBotOrchestrator:
         bid_qty: float,
         ask_qty: float,
     ) -> SignalDecision | None:
+        # Append to the anchor buffer BEFORE the trading_active gate so that
+        # ticks accumulating before the first market context event are still
+        # available for retro-anchor reconstruction.
+        self._append_anchor_sample(event_time_us, bid, ask, bid_qty, ask_qty)
+        # If a market rotation deferred its anchor pending more samples, retry
+        # now that the buffer has grown (or its window has closed).
+        if self._pending_anchor_slug_ts > 0:
+            self._try_resolve_pending_anchor()
         if not self.state.trading_active:
             return SignalDecision("NO_BUY", "market_inactive")
         signal = self.signal_engine.on_tick_fields(event_time_us, update_id, bid, ask, bid_qty, ask_qty)
+        self._maybe_log_signal_status()
         if signal is None:
             return None
 
@@ -186,16 +235,69 @@ class MinimalBotOrchestrator:
             quote_age_us=quote_age_us,
             tte_us=tte_us,
         )
+        _LOG.info(
+            "binance_signal_decision action=%s reason=%s side=%s token_id=%s ask=%.4f quote_age_us=%s tte_us=%s edge=%.4f",
+            decision.action,
+            decision.reason,
+            decision.side,
+            decision.token_id,
+            ask_float,
+            quote_age_us,
+            tte_us,
+            decision.edge,
+        )
         if decision.action == "BUY":
-            await self._hot_path.on_signal(decision.side)
+            result = await self._hot_path.on_signal(decision.side)
+            _LOG.warning("entry_hot_path_result side=%s result=%r", decision.side, result)
+            if _result_attempted_submit(result):
+                retire = getattr(self._armory, "retire", None)
+                if callable(retire):
+                    retire(decision.side)
         return decision
+
+    def _maybe_log_signal_status(self) -> None:
+        now_ns = self.state.now_ns()
+        if now_ns - self._last_signal_status_ns < 5_000_000_000:
+            return
+        self._last_signal_status_ns = now_ns
+        snap = self.signal_engine.snapshot()
+        stats = self.signal_engine.stats
+        _LOG.info(
+            "binance_signal_status accepted=%s signals=%s stale=%s stale_lag=%s spread_rejects=%s strike=%.4f microprice=%.4f ofi=%.4f imbalance=%.4f",
+            stats.accepted,
+            stats.signals,
+            stats.stale_updates + stats.stale_event_time,
+            stats.stale_lag,
+            stats.spread_rejects,
+            self.signal_engine.strike,
+            snap.last_microprice,
+            snap.last_ofi,
+            snap.last_imbalance,
+        )
+
+    def _entry_allowed(self) -> bool:
+        market = self.state.market
+        if market is None:
+            return False
+        min_tte_us = max(0, int(self._decision_cfg.min_tte_us))
+        if min_tte_us <= 0:
+            return True
+        tte_us = int(max(0.0, market.end_ts - self._now_s()) * 1_000_000)
+        return tte_us >= min_tte_us
+
+    def _disarm_entry_templates(self) -> None:
+        self._armory.reset()
+        self._hot_path.disarm("YES")
+        self._hot_path.disarm("NO")
 
     async def evaluate_exit(self) -> ExitDecision:
         if self._exit_cfg is None or self._exit_armory is None or self._tracker is None:
             return ExitDecision("HOLD", "exit_policy_unconfigured")
         if not self.state.trading_active:
             return ExitDecision("HOLD", "market_inactive")
-        self._sync_position_from_tracker()
+        self._sync_position_from_tracker(
+            self.state.position.token_id if self.state.position is not None else ""
+        )
         position = self.state.position
         quote = self.state.quotes.get(position.token_id) if position is not None else None
         market = self.state.market
@@ -213,7 +315,12 @@ class MinimalBotOrchestrator:
             return decision
         armed = await self._exit_armory.arm_exit(decision, quote_ts_ns=quote.ts_ns)
         if armed:
-            await self._hot_path.on_signal(decision.signal)
+            result = await self._hot_path.on_signal(decision.signal)
+            _LOG.warning("exit_hot_path_result side=%s result=%r", decision.side, result)
+            if _result_attempted_submit(result):
+                retire = getattr(self._exit_armory, "retire", None)
+                if callable(retire):
+                    retire(decision.signal)
         return decision
 
     # ---- market context plumbing -----------------------------------------
@@ -229,13 +336,11 @@ class MinimalBotOrchestrator:
             start_ts=float(event.get("start_ts") or 0.0),
             end_ts=float(event.get("end_ts") or 0.0),
             strike=float(event.get("strike") or 0.0),
+            slug_ts=int(event.get("slug_ts") or 0),
         )
         prior = self.state.market
         rotated = prior is None or prior.condition_id != market.condition_id or prior.slug != market.slug
 
-        if market.strike <= 0.0:
-            self._apply_market_inactive({"reason": "missing_strike"})
-            return
         self.state.set_market(market)
         self._polymarket_strike = market.strike
 
@@ -244,9 +349,99 @@ class MinimalBotOrchestrator:
             # also clear hot-path armed state and exposure lock for this scope.
             self._armory.reset()
             self._hot_path.disarm_all()
-            reference = self.signal_engine.fresh_microprice(self.signal_engine.max_lag_us)
-            self.signal_engine.set_strike(reference, reset_window=True)
+            if self._exit_armory is not None:
+                self._exit_armory.reset()
+            self._anchor_strike_on_rotation(market)
         self._sync_hot_path_exposure_scope()
+
+    def _anchor_strike_on_rotation(self, market: MinimalMarket) -> None:
+        """Seed the signal engine's strike for the new market.
+
+        Preference order:
+          1. Polymarket Gamma-provided explicit strike (markets like "BTC above
+             $X"). Used directly when > 0.
+          2. Median Binance microprice over [slug_ts, slug_ts + 0.3s] from the
+             tick buffer.
+          3. If neither available now, defer until the anchor window closes.
+             If still empty after the window, fail closed.
+        """
+        if market.strike > 0.0:
+            self.signal_engine.set_strike(float(market.strike), reset_window=True)
+            self._pending_anchor_slug_ts = 0
+            return
+        if market.slug_ts <= 0:
+            # No slug timestamp: cannot anchor; fail closed for this market.
+            _LOG.error(
+                "anchor_unavailable reason=missing_slug_ts slug=%s condition_id=%s",
+                market.slug,
+                market.condition_id,
+            )
+            self.signal_engine.set_strike(0.0, reset_window=True)
+            self._pending_anchor_slug_ts = 0
+            self._apply_market_inactive({"reason": "anchor_unavailable"})
+            return
+        # Reset the engine's window first; we'll set the strike either now (if
+        # the buffer covers the anchor window) or once it does.
+        self.signal_engine.set_strike(0.0, reset_window=True)
+        self._pending_anchor_slug_ts = int(market.slug_ts)
+        self._try_resolve_pending_anchor()
+
+    def _try_resolve_pending_anchor(self) -> None:
+        slug_ts = self._pending_anchor_slug_ts
+        if slug_ts <= 0:
+            return
+        window_start_us = slug_ts * 1_000_000
+        window_end_us = window_start_us + ANCHOR_WINDOW_END_US
+        samples = [mp for ts, mp in self._anchor_buffer if window_start_us <= ts <= window_end_us]
+        # If the latest buffered tick has not yet crossed the window end, we
+        # can still get more samples — keep waiting.
+        latest_ts = self._anchor_buffer[-1][0] if self._anchor_buffer else 0
+        if not samples and latest_ts < window_end_us:
+            return
+        if not samples:
+            # Window closed without any samples — fail closed for this market.
+            _LOG.error(
+                "anchor_unavailable reason=no_ticks_in_window slug_ts=%s window_us=[%s,%s]",
+                slug_ts,
+                window_start_us,
+                window_end_us,
+            )
+            self._pending_anchor_slug_ts = 0
+            self._apply_market_inactive({"reason": "anchor_unavailable"})
+            return
+        samples.sort()
+        n = len(samples)
+        if n % 2 == 1:
+            anchor = samples[n // 2]
+        else:
+            anchor = 0.5 * (samples[n // 2 - 1] + samples[n // 2])
+        self.signal_engine.set_strike(float(anchor), reset_window=True)
+        self._pending_anchor_slug_ts = 0
+        _LOG.warning(
+            "anchor_resolved slug_ts=%s samples=%s strike=%.4f", slug_ts, n, anchor
+        )
+
+    def _append_anchor_sample(
+        self,
+        event_time_us: int,
+        bid: float,
+        ask: float,
+        bid_qty: float,
+        ask_qty: float,
+    ) -> None:
+        total_qty = float(bid_qty) + float(ask_qty)
+        if bid <= 0.0 or ask <= 0.0 or total_qty <= 0.0:
+            return
+        microprice = (float(bid) * float(ask_qty) + float(ask) * float(bid_qty)) / total_qty
+        if microprice <= 0.0:
+            return
+        buf = self._anchor_buffer
+        buf.append((int(event_time_us), microprice))
+        # Trim left side beyond the buffer horizon. Use the latest sample as
+        # the reference to keep this O(1) amortized regardless of clock skew.
+        cutoff = int(event_time_us) - ANCHOR_BUFFER_HORIZON_US
+        while buf and buf[0][0] < cutoff:
+            buf.popleft()
 
     def _apply_market_inactive(self, event: dict[str, Any]) -> None:
         reason = str(event.get("reason") or "inactive")
@@ -254,6 +449,8 @@ class MinimalBotOrchestrator:
         self.state.mark_market_inactive(reason)
         self._armory.reset()
         self._hot_path.disarm_all()
+        if self._exit_armory is not None:
+            self._exit_armory.reset()
         self._hot_path.set_exposure_scope(set())
         # Polymarket settles the resolved market; our locally-tracked owned
         # tokens for that market are no longer ours to sell. Drop them so a
@@ -268,6 +465,10 @@ class MinimalBotOrchestrator:
             )
 
     def _update_basis_from_state(self) -> None:
+        # Telemetry-only: BasisEstimator no longer feeds back into the signal
+        # threshold. The signal engine's strike is anchored once per market
+        # rotation (see _anchor_strike_on_rotation) and is immutable until
+        # the next rotation.
         if self._basis is None or self._polymarket_strike <= 0.0:
             return
         market = self.state.market
@@ -330,6 +531,37 @@ class MinimalBotOrchestrator:
                 )
             )
             return
+
+    def _prepare_exit_from_state(self) -> None:
+        if self._exit_cfg is None or self._exit_armory is None or self._tracker is None:
+            return
+        if not self.state.trading_active:
+            return
+        if self.state.position is None:
+            self._sync_position_from_tracker()
+        position = self.state.position
+        if position is None:
+            return
+        quote = self.state.quotes.get(position.token_id)
+        if quote is None or quote.bid <= 0:
+            return
+        if position.size <= 0:
+            return
+        self._exit_armory.prepare_exit(
+            ExitDecision(
+                "SELL",
+                "prearm",
+                side=position.side,
+                token_id=position.token_id,
+                size=position.size,
+                limit_price=quote.bid,
+                bid=quote.bid,
+                ask=quote.ask,
+                order_type=self._exit_cfg.order_type,
+                signal=self._exit_cfg.signal,
+            ),
+            quote_ts_ns=quote.ts_ns,
+        )
 
     def _sync_hot_path_exposure_scope(self) -> None:
         market = self.state.market

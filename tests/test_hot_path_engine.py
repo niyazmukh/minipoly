@@ -47,14 +47,22 @@ class _RaisingSubmitter:
         raise OSError("socket reset")
 
 
-def _template(*, name: str = "entry", token_id: str = "token", side: str = "BUY", price: float = 0.51, size: float = 10.0) -> FastOrderTemplate:
+def _template(
+    *,
+    name: str = "entry",
+    token_id: str = "token",
+    side: str = "BUY",
+    price: float = 0.51,
+    size: float = 10.0,
+    body_bytes: bytes = b'{"order":1}',
+) -> FastOrderTemplate:
     return FastOrderTemplate(
         name=name,
         token_id=token_id,
         side=side,
         price=price,
         size=size,
-        body_bytes=b'{"order":1}',
+        body_bytes=body_bytes,
     )
 
 
@@ -70,6 +78,29 @@ def test_fresh_signal_submits_prearmed_template() -> None:
     assert result.reason == "submitted"
     assert result.order_id == "oid-1"
     assert submitter.calls[0].token_id == "yes"
+
+
+def test_template_is_single_use_after_venue_rejection() -> None:
+    submitter = _SequenceSubmitter(
+        [
+            {
+                "_http_status": 400,
+                "error": "no orders found to match with FAK order",
+                "orderID": "oid-rejected",
+            }
+        ]
+    )
+    engine = HotPathEngine(submitter=submitter, now_ns=lambda: 1_000_000_000)
+    engine.arm("NO", _template(token_id="no", price=0.59), HotPathGuard(max_ask=Decimal("0.60")))
+    engine.update_quote("no", bid=Decimal("0.58"), ask=Decimal("0.59"), ts_ns=999_900_000)
+
+    first = asyncio.run(engine.on_signal("NO"))
+    second = asyncio.run(engine.on_signal("NO"))
+
+    assert first.reason == "submit_failed"
+    assert first.order_id == "oid-rejected"
+    assert second.reason == "not_armed"
+    assert len(submitter.calls) == 1
 
 
 def test_stale_quote_blocks_without_submit() -> None:
@@ -95,6 +126,19 @@ def test_ask_guard_blocks_crossed_price() -> None:
 
     assert result.submitted is False
     assert result.reason == "ask_above_guard"
+    assert submitter.calls == []
+
+
+def test_min_ask_guard_blocks_penny_entry_without_submit() -> None:
+    submitter = _Submitter()
+    engine = HotPathEngine(submitter=submitter, now_ns=lambda: 1_000)
+    engine.arm("NO", _template(token_id="no"), HotPathGuard(max_ask=Decimal("0.85"), min_ask=Decimal("0.10")))
+    engine.update_quote("no", bid=Decimal("0.00"), ask=Decimal("0.01"), ts_ns=1_000)
+
+    result = asyncio.run(engine.on_signal("NO"))
+
+    assert result.submitted is False
+    assert result.reason == "ask_below_guard"
     assert submitter.calls == []
 
 
@@ -283,11 +327,14 @@ def test_failed_buy_submit_does_not_lock_cycle_and_can_retry() -> None:
 
     first = asyncio.run(engine.on_signal("YES"))
     second = asyncio.run(engine.on_signal("YES"))
+    engine.arm("YES", _template(token_id="yes", side="BUY", body_bytes=b'{"order":2}'), HotPathGuard(max_ask=Decimal("1")))
+    third = asyncio.run(engine.on_signal("YES"))
 
     assert first.submitted is False
     assert first.reason == "submit_failed"
-    assert second.submitted is True
-    assert second.order_id == "oid-2"
+    assert second.reason == "not_armed"
+    assert third.submitted is True
+    assert third.order_id == "oid-2"
     assert len(submitter.calls) == 2
 
 
@@ -348,8 +395,11 @@ def test_failed_sell_submit_does_not_reserve_inventory() -> None:
     assert tracker.sellable("yes") == Decimal("5")
 
     second = asyncio.run(engine.on_signal("EXIT"))
+    engine.arm("EXIT", _template(name="exit", token_id="yes", side="SELL", size=5.0, body_bytes=b'{"order":2}'), HotPathGuard(max_ask=Decimal("1")))
+    third = asyncio.run(engine.on_signal("EXIT"))
 
-    assert second.submitted is True
+    assert second.reason == "not_armed"
+    assert third.submitted is True
     assert tracker.sellable("yes") == Decimal("0")
 
 
@@ -393,9 +443,12 @@ def test_failed_submit_marks_pending_failed_without_reserving_or_locking() -> No
 
     first = asyncio.run(engine.on_signal("YES"))
     second = asyncio.run(engine.on_signal("YES"))
+    engine.arm("YES", _template(token_id="yes", side="BUY", size=5.0, body_bytes=b'{"order":2}'), HotPathGuard(max_ask=Decimal("1")))
+    third = asyncio.run(engine.on_signal("YES"))
 
     assert first.submitted is False
-    assert second.submitted is True
+    assert second.reason == "not_armed"
+    assert third.submitted is True
     statuses = [p.status for p in tracker.pending_submits.values()]
     assert statuses == ["FAILED", "CONFIRMED"]
 

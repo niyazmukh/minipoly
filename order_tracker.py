@@ -182,6 +182,8 @@ class TradeState:
 #                    for WSS matching (with size/price tolerance) so a server-
 #                    accepted order can still be reconciled into the tracker.
 _PENDING_MATCH_STATUSES = frozenset({"PENDING", "UNKNOWN"})
+_EXPIRED_UNKNOWN_STATUS = "EXPIRED_UNKNOWN"
+_MATCHABLE_SUBMIT_STATUSES = _PENDING_MATCH_STATUSES | frozenset({_EXPIRED_UNKNOWN_STATUS})
 
 
 @dataclass(frozen=True, slots=True)
@@ -317,7 +319,7 @@ class LocalOrderTracker:
         # Drop pending submits for resolved assets so a stale UNKNOWN can't
         # bind a future event to a market that no longer exists.
         for submit_id, pending in list(self.pending_submits.items()):
-            if pending.asset_id in scope and pending.status in _PENDING_MATCH_STATUSES:
+            if pending.asset_id in scope and pending.status in _MATCHABLE_SUBMIT_STATUSES:
                 self.pending_submits[submit_id] = dataclasses.replace(
                     pending, status="FAILED", last_error="market_resolved"
                 )
@@ -355,7 +357,7 @@ class LocalOrderTracker:
         return updated
 
     def expire_unknown_submits(self, *, now_ts: float, max_age_s: float) -> list[str]:
-        """Convert UNKNOWN submits older than max_age_s to FAILED.
+        """Age UNKNOWN submits out of the active-unconfirmed set.
 
         Caller is responsible for choosing a window large enough that a
         server-accepted order would have surfaced via WSS by then. Returns
@@ -370,7 +372,9 @@ class LocalOrderTracker:
             if pending.created_ts <= 0 or pending.created_ts > cutoff:
                 continue
             self.pending_submits[submit_id] = dataclasses.replace(
-                pending, status="FAILED", last_error=pending.last_error or "expired_unknown"
+                pending,
+                status=_EXPIRED_UNKNOWN_STATUS,
+                last_error=pending.last_error or "expired_unknown",
             )
             expired.append(submit_id)
         return expired
@@ -724,7 +728,7 @@ class LocalOrderTracker:
         for submit_id, pending in self.pending_submits.items():
             if pending.confirmed_order_id:
                 continue
-            if pending.status not in _PENDING_MATCH_STATUSES:
+            if pending.status not in _MATCHABLE_SUBMIT_STATUSES:
                 continue
             if pending.asset_id != asset_id or pending.side != side:
                 continue

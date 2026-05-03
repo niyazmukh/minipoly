@@ -22,9 +22,11 @@ python minimal/minimal_live_bot.py
 
 Startup is intentionally guarded:
 
-- `POLY_ALLOW_LIVE_ORDERS=true` is required.
+- `POLY_ALLOW_LIVE_ORDERS=true` is required for production live trading.
+- `MINIMAL_DRY_RUN_ORDERS=true` enables non-transactional smoke tests; the runtime can connect to live feeds and build/sign templates, but submit/cancel calls are local no-ops and never hit Polymarket order endpoints.
+- `MINIMAL_MIN_BUY_LIMIT` and `MINIMAL_DECISION_MIN_TTE_US` are required live entry boundaries. Startup fails closed if either is missing or incoherent. Use `MINIMAL_DECISION_MIN_TTE_US=45000000` for a 45-second no-entry window before market expiry.
 - `POLY_ALLOW_UNTRACKED_SELL` must stay false for autonomous runtime use.
-- Historical startup position hydration is intentionally not implemented. If Data API reports existing positions, startup fails unless `MINIMAL_ALLOW_DIRTY_START=true` is set for manual recovery.
+- Historical startup positions are intentionally ignored (current-run-only design). Only resting open orders are checked at startup — an old order could still fill. Set `MINIMAL_ALLOW_DIRTY_START=true` to skip the open-order check for manual recovery.
 
 ## Hot Path Rules
 
@@ -35,6 +37,7 @@ Startup is intentionally guarded:
 - Keep debug output in standalone probe mode or exception/status paths only.
 - Sell decisions must use `LocalOrderTracker` sellable inventory from user-channel confirmations.
 - Buy decisions must respect the one-unsold-position rule through `HotPathEngine` and `LocalOrderTracker.has_open_exposure()`.
+- Buy decisions must use the same explicit min/max entry-price and no-entry TTE boundaries in `SignalDecisionConfig`, `TemplateArmory`, and `HotPathGuard`; do not rely on permissive defaults for live trading.
 - Stale order cancellation must stay off the signal hot path; it runs as a separate periodic supervisor task.
 - Shutdown order cancellation is a lifecycle cleanup step, not a per-event operation.
 
@@ -54,11 +57,74 @@ Startup is intentionally guarded:
 - `hot_path_engine.py` checks quote, inventory, and one-position-cycle guards, then submits armed templates.
 - `order_tracker.py` tracks user-channel orders, fills, owned, reserved, sellable, cost basis, exposure state, stale live order ids, and currently live order ids.
 - `fast_order_submitter.py` submits prebuilt signed order bodies with fresh L2 headers and batches order cancels through `DELETE /orders`.
+- `fast_order_submitter.py` signs order templates with `py_clob_client_v2` in the background but keeps the hot path as raw prebuilt body bytes plus fresh L2 headers.
 
 ## Runtime Knobs
 
 - `MINIMAL_CANCEL_INTERVAL_S`: stale-order scan interval, default `0.25`.
 - `MINIMAL_CANCEL_STALE_ORDER_S`: live-order age before batch cancel, default `2.0`.
+
+## Strike Anchoring
+
+For each market rotation, the orchestrator chooses the signal-engine strike
+in this order:
+
+1. **Polymarket Gamma explicit strike** (e.g. "BTC above $X" markets) — used
+   verbatim when present (`event.strike > 0`).
+2. **Slug-time Binance microprice anchor** for direction-only ("Up or Down")
+   markets where Gamma carries no strike. The orchestrator buffers Binance
+   microprice ticks and computes the median over the window
+   `[slug_ts, slug_ts + 0.3 s]`. Strike is then immutable for the market.
+3. **Fail closed** if the anchor window has already passed without any
+   buffered ticks, or if `slug_ts` is missing. The orchestrator marks the
+   market inactive (`anchor_unavailable`) and waits for the next rotation.
+
+`BasisEstimator` is now telemetry-only — it no longer adjusts the engine's
+strike. `MINIMAL_BINANCE_BASIS_USD` is preserved as a seed for the basis
+estimator but does not affect trading thresholds.
+
+## Probabilistic Signal Decision
+
+`signal_decision.decide_buy` uses a Brownian barrier-cross probability:
+
+```
+P_yes = Phi((microprice - strike + alpha*OFI + beta*imbalance*sigma_px)
+            / (sigma_scale * sigma_px * sqrt(tte_s)))
+```
+
+`sigma_px` is the Welford stddev of microprices in the engine's window.
+The decision computes `edge = side_prob - ask` and gates on `min_edge`
+plus a hard probability floor `min_prob` (default 0.55). The path fails
+closed (`prob_unavailable`) when strike or microprice is unset, tte is
+out of bounds, or the implied sigma_eff is degenerate.
+
+Set `MINIMAL_PROB_USE_LEGACY=true` to fall back to the legacy
+`fair = 0.5 + strength*scale` heuristic. Defaults are conservative and
+will trade *less* often than the legacy heuristic until alpha/beta are
+fitted.
+
+| Var | Default |
+| --- | --- |
+| `MINIMAL_PROB_ALPHA_OFI` | `0.0` |
+| `MINIMAL_PROB_BETA_IMB` | `0.0` |
+| `MINIMAL_PROB_SIGMA_SCALE` | `1.5` |
+| `MINIMAL_PROB_SIGMA_FLOOR_USD` | `5.0` |
+| `MINIMAL_PROB_FLOOR` | `0.02` |
+| `MINIMAL_PROB_CEIL` | `0.98` |
+| `MINIMAL_PROB_MIN_PROB` | `0.55` |
+| `MINIMAL_PROB_MAX_TTE_US` | `600000000` |
+| `MINIMAL_PROB_USE_LEGACY` | `false` |
+
+## FAK Latency
+
+`FastOrderSubmitter.submit` enforces a per-request `aiohttp.ClientTimeout`
+of `total=1.0s, sock_connect=0.3s, sock_read=1.0s` so a stuck socket fails
+fast instead of riding the session-wide 3 s timeout. Session keepalive is
+75 s with persistent connection pool (`POLY_HTTP_CONN_LIMIT=8`).
+
+The single biggest remaining latency win — moving the bot to `us-east-1`
+near the Polymarket origin — is an infrastructure change tracked outside
+this code.
 
 ## EC2 Startup
 

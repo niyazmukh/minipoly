@@ -22,6 +22,7 @@ tmp/
 .pytest-*/
 pytest-cache-files*/
 .claude/
+NUL
 
 # graphify transient cache
 graphify-out/cache/

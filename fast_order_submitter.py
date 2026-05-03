@@ -11,9 +11,27 @@ import orjson
 from py_clob_client.client import ClobClient
 from py_clob_client.clob_types import OrderArgs
 
+try:
+    from py_clob_client_v2.clob_types import OrderArgs as OrderArgsV2
+    from py_clob_client_v2.order_builder.builder import ROUNDING_CONFIG as V2_ROUNDING_CONFIG
+    from py_clob_client_v2.order_utils.model.order_data_v2 import order_to_json_v2
+except ImportError:  # pragma: no cover - exercised only when optional v2 SDK is absent.
+    OrderArgsV2 = None
+    V2_ROUNDING_CONFIG = None
+    order_to_json_v2 = None
+
 
 ORDER_PATH = "/order"
 CANCEL_ORDERS_PATH = "/orders"
+
+# Tight per-request timeout for FAK order submission. Beats the session-wide
+# default which is friendlier to long-poll endpoints. Values target the
+# observed Polymarket /order p95 of ~850ms so a stuck socket fails fast.
+_ORDER_POST_TIMEOUT = aiohttp.ClientTimeout(
+    total=1.0,
+    sock_connect=0.3,
+    sock_read=1.0,
+)
 
 
 def _decode_secret(secret: str) -> bytes:
@@ -22,12 +40,16 @@ def _decode_secret(secret: str) -> bytes:
 
 
 def build_order_body(
-    signed_order: dict[str, Any],
+    signed_order: Any,
     *,
     owner: str,
     order_type: str,
     post_only: bool,
 ) -> bytes:
+    if _is_v2_signed_order(signed_order):
+        if order_to_json_v2 is None:
+            raise RuntimeError("py_clob_client_v2 is required to serialize V2 signed orders")
+        return orjson.dumps(order_to_json_v2(signed_order, owner, order_type, bool(post_only), False))
     return orjson.dumps(
         {
             "order": signed_order,
@@ -36,6 +58,18 @@ def build_order_body(
             "postOnly": bool(post_only),
         }
     )
+
+
+def _is_v2_signed_order(signed_order: Any) -> bool:
+    return hasattr(signed_order, "timestamp") and hasattr(signed_order, "builder")
+
+
+def _patch_v2_rounding_for_venue() -> None:
+    if V2_ROUNDING_CONFIG is None:
+        return
+    for round_config in V2_ROUNDING_CONFIG.values():
+        if getattr(round_config, "amount", 0) > 2:
+            round_config.amount = 2
 
 
 def extract_order_id(obj: Any) -> str:
@@ -158,12 +192,15 @@ async def prepare_template(
     order_type: str,
     post_only: bool,
 ) -> FastOrderTemplate:
+    order_args_cls = OrderArgsV2 if OrderArgsV2 is not None and _uses_v2_orders(clob) else OrderArgs
+    if order_args_cls is OrderArgsV2:
+        _patch_v2_rounding_for_venue()
     signed = await asyncio.to_thread(
         clob.create_order,
-        OrderArgs(token_id=token_id, price=float(price), size=float(size), side=side),
+        order_args_cls(token_id=token_id, price=float(price), size=float(size), side=side),
     )
     body = build_order_body(
-        signed.dict(),
+        signed if _is_v2_signed_order(signed) else signed.dict(),
         owner=owner,
         order_type=order_type,
         post_only=post_only,
@@ -178,6 +215,10 @@ async def prepare_template(
     )
 
 
+def _uses_v2_orders(clob: Any) -> bool:
+    return clob.__class__.__module__.split(".", 1)[0] == "py_clob_client_v2"
+
+
 class FastOrderSubmitter:
     __slots__ = ("_session", "_signer", "_path")
 
@@ -190,7 +231,12 @@ class FastOrderSubmitter:
         body = template.body_bytes
         headers = self._signer.headers("POST", self._path, body)
         try:
-            async with self._session.post(self._path, data=body, headers=headers) as resp:
+            async with self._session.post(
+                self._path,
+                data=body,
+                headers=headers,
+                timeout=_ORDER_POST_TIMEOUT,
+            ) as resp:
                 raw = await resp.read()
                 try:
                     data = orjson.loads(raw)
@@ -221,3 +267,24 @@ class FastOrderSubmitter:
                 return data
         except Exception as exc:
             return {"success": False, "_http_status": 0, "error": "transport_error", "detail": repr(exc)}
+
+
+class DryRunOrderSubmitter:
+    __slots__ = ("_session",)
+
+    def __init__(self, session: aiohttp.ClientSession) -> None:
+        self._session = session
+
+    async def submit(self, template: FastOrderTemplate) -> dict[str, Any]:
+        return {
+            "success": False,
+            "_http_status": 0,
+            "error": "dry_run",
+            "side": template.side,
+            "token_id": template.token_id,
+            "price": template.price,
+            "size": template.size,
+        }
+
+    async def cancel_orders(self, order_ids: list[str]) -> Any:
+        return {"success": True, "_http_status": 0, "dry_run": True, "cancelled": list(order_ids)}

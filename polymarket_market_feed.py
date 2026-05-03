@@ -18,6 +18,8 @@ async def apply_market_event(
     event: dict[str, Any],
     state: MinimalRuntimeState,
     armory: _Armory,
+    *,
+    arm_entries: bool = True,
 ) -> bool:
     if _is_market_resolved(event, state):
         state.mark_market_inactive("resolved")
@@ -35,7 +37,8 @@ async def apply_market_event(
         # The armory implementation is required to be effectively non-blocking
         # here (single-flight rearm scheduled internally). The await is
         # retained only to honour the existing protocol signature.
-        await armory.on_quote(signal=side, token_id=token_id, bid=quote.bid, ask=quote.ask, tick=quote.tick)
+        if arm_entries:
+            await armory.on_quote(signal=side, token_id=token_id, bid=quote.bid, ask=quote.ask, tick=quote.tick)
         changed = True
     return changed
 

@@ -2,6 +2,8 @@
 
 Date: 2026-05-02
 
+Updated: 2026-05-03 after EC2 live troubleshooting.
+
 ## Scope
 
 This audit covers the prototype runtime under `minimal/`. It is separate from `src/`; use `minimal/graphify-out/` for code graph review.
@@ -15,7 +17,9 @@ This audit covers the prototype runtime under `minimal/`. It is separate from `s
    - Creates one shared aiohttp order session.
    - Runs Polymarket market WS, Polymarket user WS, Binance SBE, and exit evaluation as supervised asyncio tasks.
    - Cancels sibling tasks on failure instead of leaving partial runtime state alive.
-   - Fails startup on non-zero unseeded inventory unless explicitly overridden for manual recovery.
+   - Ignores historical startup positions by design; this runtime only manages positions it creates in the current process.
+   - Fails startup on existing open CLOB orders unless explicitly overridden for manual recovery.
+   - Fails startup unless live entry boundaries are explicit: `MINIMAL_MIN_BUY_LIMIT` and `MINIMAL_DECISION_MIN_TTE_US`.
    - Runs stale-order cancellation as a separate slow supervisor loop, not on the signal path.
    - Cancels locally tracked live orders during shutdown before HTTP clients close.
    - Uses `minimal/.env.poly` as the EC2 startup environment file.
@@ -46,13 +50,16 @@ This audit covers the prototype runtime under `minimal/`. It is separate from `s
 
 7. `template_armory.py` and `exit_armory.py`
    - Prebuild buy/sell templates for fast submission.
+   - Entry armory enforces configured min/max buy limits before signing.
 
 8. `hot_path_engine.py`
    - Enforces quote freshness, price guards, in-flight/duplicate guard, one-unsold-position guard, and sellable inventory guard before submit.
+   - Signed templates are single-use. A POST attempt retires the armed template so a FAK no-match cannot be retried with the same order hash.
 
 9. `fast_order_submitter.py`
    - Sends prebuilt order bodies with fresh L2 headers through an existing aiohttp session.
    - Cancels live orders in batch through authenticated `DELETE /orders`.
+   - Uses `py_clob_client_v2` for background template signing/serialization while preserving prebuilt-body hot submission.
 
 ## Removed Or Avoided Overhead
 
@@ -62,7 +69,7 @@ This audit covers the prototype runtime under `minimal/`. It is separate from `s
 - Suppressed callback-mode context/status/event prints. Pretty JSON dumps remain only for standalone probe mode.
 - Suppressed Binance SBE status formatting when a tick callback is attached.
 - Added a single in-process EC2 entrypoint instead of subprocess wrappers.
-- Added a startup dirty-inventory guard instead of unsafe partial position seeding.
+- Added a startup open-order guard instead of unsafe partial position seeding or historical position adoption.
 - Added stale live-order scanning/cancellation on a periodic slow path.
 - Added shutdown cancellation for locally tracked live orders as lifecycle cleanup.
 - Added a one-unsold-position rule: after a buy submits, further buys are blocked until the tracked token is sold and exposure is flat.
@@ -79,6 +86,7 @@ This audit covers the prototype runtime under `minimal/`. It is separate from `s
 
 - Add deeper reconciliation if exchange/account APIs expose complete open-order snapshots. Current runtime cancels locally tracked stale orders while running and locally tracked live orders during shutdown.
 - Keep reviewing exit and risk measures independently; do not blindly copy from `src/`.
+- The latest EC2 run still showed 1.0s `submit_unknown` responses from `/order`; this is transport/venue latency, not a local hot-path allocation issue.
 
 ## Verification Baseline
 
@@ -86,7 +94,7 @@ Current baseline after the latest streamlining pass:
 
 - Full minimal tests: run `python -m pytest minimal\tests -q`.
 - Callback suppression tests cover market/user websocket callback mode and Binance SBE callback mode.
-- Standalone runtime tests cover callback wiring, sibling cancellation, config field compatibility, startup dirty-inventory guard, stale cancellation, and shutdown cancellation.
+- Standalone runtime tests cover callback wiring, sibling cancellation, config field compatibility, startup open-order guard, stale cancellation, and shutdown cancellation.
 - Hot-path tests cover the one-unsold-position rule.
 - Order-cancel tests cover tracker selection and authenticated batch cancel payloads.
 - Graphify map was updated after code changes.

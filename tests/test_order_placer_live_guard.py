@@ -26,6 +26,16 @@ def test_order_config_accepts_explicit_live_order_opt_in(monkeypatch: pytest.Mon
     assert cfg.private_key == os.environ["POLY_PK"]
 
 
+def test_order_config_accepts_dry_run_order_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("POLY_PK", "0x" + "1" * 64)
+    monkeypatch.delenv("POLY_ALLOW_LIVE_ORDERS", raising=False)
+    monkeypatch.setenv("MINIMAL_DRY_RUN_ORDERS", "true")
+
+    cfg = MinimalOrderConfig.from_env()
+
+    assert cfg.private_key == os.environ["POLY_PK"]
+
+
 def test_manual_sell_requires_separate_untracked_sell_opt_in(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("POLY_PK", "0x" + "1" * 64)
     monkeypatch.setenv("POLY_ALLOW_LIVE_ORDERS", "true")

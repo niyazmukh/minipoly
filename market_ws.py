@@ -49,6 +49,7 @@ class MarketContext:
     start_ts: float = 0.0
     end_ts: float = 0.0
     strike: float = 0.0
+    slug_ts: int = 0
 
 
 WebSocketConn = Any
@@ -230,8 +231,8 @@ async def _discover_current_market(http: CLOBHttpClient, cfg: BotConfig) -> Mark
             continue
         condition_id = str(m.get("conditionId") or "")
         strike = _extract_strike(m, event)
-        if strike <= 0:
-            continue
+        # strike=0 is valid for direction-only ("Up or Down") markets; the
+        # signal engine auto-bootstraps the strike from the first Binance tick.
         return MarketContext(
             slug=slug,
             condition_id=condition_id,
@@ -243,6 +244,7 @@ async def _discover_current_market(http: CLOBHttpClient, cfg: BotConfig) -> Mark
             start_ts=start_ts,
             end_ts=end_ts,
             strike=strike,
+            slug_ts=int(ts),
         )
     return None
 
@@ -280,6 +282,7 @@ def _make_context_event(reason: str, ctx: MarketContext) -> dict[str, Any]:
         "start_ts": ctx.start_ts,
         "end_ts": ctx.end_ts,
         "strike": ctx.strike,
+        "slug_ts": ctx.slug_ts,
     }
 
 

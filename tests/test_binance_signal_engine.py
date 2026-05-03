@@ -102,7 +102,10 @@ def test_no_signal_requires_downward_move_and_negative_ofi() -> None:
     assert signal.imbalance < 0
 
 
-def test_zero_strike_captures_first_binance_microprice_as_market_reference() -> None:
+def test_zero_strike_does_not_signal_and_does_not_self_bootstrap() -> None:
+    # Strike anchoring is now external (see MinimalBotOrchestrator). The
+    # engine must NOT auto-bootstrap from the first tick — that historical
+    # behaviour produced silently-wrong strikes.
     engine = BinanceSignalEngine(
         BinanceSignalConfig(
             strike=0.0,
@@ -116,13 +119,36 @@ def test_zero_strike_captures_first_binance_microprice_as_market_reference() -> 
     )
 
     first = engine.on_tick(_tick(event_time_us=1_000_000, update_id=1, bid=99.90, ask=100.10))
-    signal = engine.on_tick(_tick(event_time_us=1_300_000, update_id=2, bid=100.50, ask=100.70, bid_qty=5.0, ask_qty=2.0))
+    second = engine.on_tick(_tick(event_time_us=1_300_000, update_id=2, bid=100.50, ask=100.70, bid_qty=5.0, ask_qty=2.0))
 
     assert first is None
-    assert engine.strike == 100.0
+    assert second is None
+    assert engine.strike == 0.0
+
+
+def test_set_strike_then_signal_includes_strike_and_sigma_px() -> None:
+    engine = BinanceSignalEngine(
+        BinanceSignalConfig(
+            strike=0.0,
+            max_lag_us=0,
+            min_window_us=200_000,
+            min_abs_move=0.20,
+            min_abs_ofi=0.20,
+            min_imbalance=0.05,
+            max_spread=1.00,
+        )
+    )
+    engine.set_strike(100.0, reset_window=True)
+
+    engine.on_tick(_tick(event_time_us=1_000_000, update_id=1, bid=99.90, ask=100.10))
+    signal = engine.on_tick(_tick(event_time_us=1_300_000, update_id=2, bid=100.50, ask=100.70, bid_qty=5.0, ask_qty=2.0))
+
     assert signal is not None
     assert signal.side == "YES"
     assert signal.move > 0
+    assert signal.strike == 100.0
+    # Two distinct microprice samples in the window, so sigma_px must be > 0.
+    assert signal.sigma_px > 0.0
 
 
 def test_listener_style_callback_fires_hot_path_once() -> None:

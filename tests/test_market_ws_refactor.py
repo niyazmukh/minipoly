@@ -17,7 +17,10 @@ def test_extract_strike_does_not_use_env_fallback(monkeypatch) -> None:
     assert _extract_strike({}, {}) == 0.0
 
 
-def test_discovery_fails_closed_when_strike_is_missing() -> None:
+def test_discovery_succeeds_with_zero_strike_for_direction_only_markets() -> None:
+    # "Bitcoin Up or Down" markets have no static strike price in metadata.
+    # Discovery must succeed with strike=0; the signal engine bootstraps the
+    # strike from the first Binance tick.
     class _Http:
         async def get_clob_time(self) -> int:
             return 300
@@ -41,7 +44,11 @@ def test_discovery_fails_closed_when_strike_is_missing() -> None:
 
     cfg = SimpleNamespace(market_window_s=300, market_slug_fmt="btc-updown-5m-{ts}")
 
-    assert asyncio.run(_discover_current_market(_Http(), cfg)) is None
+    ctx = asyncio.run(_discover_current_market(_Http(), cfg))
+    assert ctx is not None
+    assert ctx.strike == 0.0
+    assert ctx.yes_token_id == "yes"
+    assert ctx.no_token_id == "no"
 
 
 def test_new_market_frame_wakes_reconcile_loop_immediately() -> None:

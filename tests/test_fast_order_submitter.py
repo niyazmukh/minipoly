@@ -9,6 +9,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from fast_order_submitter import (
+    DryRunOrderSubmitter,
     FastOrderTemplate,
     FastOrderSubmitter,
     HeaderSigner,
@@ -52,6 +53,43 @@ def test_build_order_body_is_stable_and_compact() -> None:
     )
 
     assert body == b'{"order":{"tokenId":"token","side":"BUY","salt":7},"owner":"api-key","orderType":"FAK","postOnly":false}'
+
+
+def test_build_order_body_serializes_v2_signed_order_for_buy_and_sell() -> None:
+    from py_clob_client_v2.order_utils.model.order_data_v2 import SignedOrderV2
+    from py_clob_client_v2.order_utils.model.side import Side
+    from py_clob_client_v2.order_utils.model.signature_type_v2 import SignatureTypeV2
+
+    for side, side_text in ((Side.BUY, "BUY"), (Side.SELL, "SELL")):
+        body = build_order_body(
+            SignedOrderV2(
+                salt="1",
+                maker="0x0000000000000000000000000000000000000001",
+                signer="0x0000000000000000000000000000000000000002",
+                tokenId="123",
+                makerAmount="100",
+                takerAmount="200",
+                side=side,
+                signatureType=SignatureTypeV2.EOA,
+                timestamp="1770000000000",
+                metadata="0x" + "0" * 64,
+                builder="0x" + "0" * 64,
+                expiration="0",
+                signature="0xsig",
+            ),
+            owner="api-key",
+            order_type="FAK",
+            post_only=False,
+        )
+
+        assert b'"timestamp":"1770000000000"' in body
+        assert b'"metadata":"0x' in body
+        assert b'"builder":"0x' in body
+        assert b'"deferExec":false' in body
+        assert f'"side":"{side_text}"'.encode("ascii") in body
+        assert b'"feeRateBps"' not in body
+        assert b'"nonce"' not in body
+        assert b'"taker"' not in body
 
 
 def test_extract_order_id_accepts_common_clob_response_shapes() -> None:
@@ -155,3 +193,31 @@ def test_cancel_transport_error_returns_structured_failure() -> None:
     assert result["success"] is False
     assert result["_http_status"] == 0
     assert result["error"] == "transport_error"
+
+
+def test_dry_run_submitter_never_uses_http_session() -> None:
+    class _Session:
+        def post(self, *_args, **_kwargs):
+            raise AssertionError("dry run must not POST /order")
+
+        def delete(self, *_args, **_kwargs):
+            raise AssertionError("dry run must not DELETE /orders")
+
+    import asyncio
+
+    submitter = DryRunOrderSubmitter(_Session())  # type: ignore[arg-type]
+    template = FastOrderTemplate(name="entry", token_id="yes", side="BUY", price=0.5, size=1.0, body_bytes=b"{}")
+
+    submitted = asyncio.run(submitter.submit(template))
+    cancelled = asyncio.run(submitter.cancel_orders(["oid-1"]))
+
+    assert submitted == {
+        "success": False,
+        "_http_status": 0,
+        "error": "dry_run",
+        "side": "BUY",
+        "token_id": "yes",
+        "price": 0.5,
+        "size": 1.0,
+    }
+    assert cancelled == {"success": True, "_http_status": 0, "dry_run": True, "cancelled": ["oid-1"]}

@@ -26,6 +26,7 @@ class QuoteSnapshot:
 @dataclass(frozen=True, slots=True)
 class HotPathGuard:
     max_ask: Decimal
+    min_ask: Decimal = _DEC_ZERO
     min_bid: Decimal = _DEC_ZERO
     max_age_ns: int = 0
 
@@ -169,6 +170,8 @@ class HotPathEngine:
         age_ns = start_ns - quote.ts_ns
         if age_ns < 0 or age_ns > max_age_ns:
             return HotPathResult(False, "quote_stale")
+        if armed.side == "BUY" and armed.guard.min_ask > 0 and quote.ask < armed.guard.min_ask:
+            return HotPathResult(False, "ask_below_guard")
         if armed.guard.max_ask > 0 and (quote.ask <= 0 or quote.ask > armed.guard.max_ask):
             return HotPathResult(False, "ask_above_guard")
         if armed.guard.min_bid > 0 and quote.bid < armed.guard.min_bid:
@@ -193,8 +196,10 @@ class HotPathEngine:
                 Decimal(str(template.price)),
                 now_ts=start_ns / _NS_PER_S,
             )
+        attempted_submit = False
         try:
             try:
+                attempted_submit = True
                 response = await self._submitter.submit(template)
             except Exception as exc:
                 # Transport-level failure: the submit *may* have reached the
@@ -285,6 +290,8 @@ class HotPathEngine:
                 response=response,
             )
         finally:
+            if attempted_submit:
+                self.disarm(key)
             if armed.side == "BUY":
                 self._in_flight_buy = False
             else:

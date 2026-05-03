@@ -47,6 +47,8 @@ class BinanceSignal:
     imbalance: float
     spread: float
     strength: float
+    sigma_px: float = 0.0
+    strike: float = 0.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -245,8 +247,11 @@ class BinanceSignalEngine:
         self._last_imbalance = imbalance
         self.stats.accepted += 1
         self._append(event_time_us, microprice, ofi)
+        # Strike is anchored externally (orchestrator reads slug_ts and seeds
+        # the median Binance microprice over [slug_ts, slug_ts+0.3s]). When
+        # strike has not yet been set, we accumulate window samples but do
+        # not produce a signal.
         if self._cfg.strike <= 0.0:
-            self._cfg = replace(self._cfg, strike=microprice)
             return None
 
         return self._maybe_signal(event_time_us, update_id, microprice, ofi, imbalance, spread)
@@ -283,7 +288,7 @@ class BinanceSignalEngine:
         if self._count < 2:
             return None
 
-        oldest_time, oldest_micro, ofi_sum = self._window_baseline(event_time_us)
+        oldest_time, oldest_micro, ofi_sum, sigma_px = self._window_baseline(event_time_us)
         if oldest_time <= 0:
             return None
         window_us = event_time_us - oldest_time
@@ -329,13 +334,19 @@ class BinanceSignalEngine:
             imbalance=imbalance,
             spread=spread,
             strength=strength,
+            sigma_px=sigma_px,
+            strike=self._cfg.strike,
         )
 
-    def _window_baseline(self, event_time_us: int) -> tuple[int, float, float]:
+    def _window_baseline(self, event_time_us: int) -> tuple[int, float, float, float]:
         cutoff = event_time_us - self._cfg.max_window_us
         oldest_time = 0
         oldest_micro = 0.0
         ofi_sum = 0.0
+        # Welford online variance accumulator over in-window microprices.
+        n = 0
+        mean = 0.0
+        m2 = 0.0
         count = self._count
         size = len(self._event_times)
         start = (self._cursor - count) % size
@@ -348,7 +359,13 @@ class BinanceSignalEngine:
                 oldest_time = ts
                 oldest_micro = self._microprices[idx]
             ofi_sum += self._ofis[idx]
-        return oldest_time, oldest_micro, ofi_sum
+            n += 1
+            x = self._microprices[idx]
+            delta = x - mean
+            mean += delta / n
+            m2 += delta * (x - mean)
+        sigma_px = (m2 / (n - 1)) ** 0.5 if n >= 2 else 0.0
+        return oldest_time, oldest_micro, ofi_sum, sigma_px
 
 
 def _time_us() -> int:

@@ -8,6 +8,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from minimal_live_bot import (
     LiveBot,
     _binance_signal_cfg,
+    _entry_decision_cfg,
+    _dry_run_order_mode,
+    _entry_boundary_config,
     _ensure_calibrated_model,
     _order_type_env,
     cancel_open_orders_once,
@@ -248,25 +251,102 @@ def test_calibrated_model_rejects_legacy_unversioned_file() -> None:
             pass
 
 
-def test_startup_position_check_is_current_run_only_and_does_not_block() -> None:
+def test_startup_ignores_historical_positions_current_run_only_design() -> None:
     class _Http:
-        called = False
-
         async def dataapi_positions_abs_sum(self, _address: str):
-            self.called = True
-            return 3, 2
+            raise AssertionError("startup must not query historical positions")
 
-    http = _Http()
+        async def clob_open_order_count(self):
+            return 0
 
-    asyncio.run(ensure_flat_start(http, "0xabc", allow_dirty_start=False))
-
-    assert http.called is False
+    asyncio.run(ensure_flat_start(_Http(), "0xabc", allow_dirty_start=False))
 
 
-def test_startup_position_override_flag_is_accepted_but_no_longer_needed() -> None:
+def test_dry_run_order_mode_allows_non_transactional_startup(monkeypatch) -> None:
+    monkeypatch.delenv("POLY_ALLOW_LIVE_ORDERS", raising=False)
+    monkeypatch.setenv("MINIMAL_DRY_RUN_ORDERS", "true")
+
+    assert _dry_run_order_mode() is True
+
+
+def test_order_mode_refuses_startup_without_live_or_dry(monkeypatch) -> None:
+    monkeypatch.delenv("POLY_ALLOW_LIVE_ORDERS", raising=False)
+    monkeypatch.delenv("MINIMAL_DRY_RUN_ORDERS", raising=False)
+
+    try:
+        _dry_run_order_mode()
+    except RuntimeError as exc:
+        assert "POLY_ALLOW_LIVE_ORDERS=true" in str(exc)
+        assert "MINIMAL_DRY_RUN_ORDERS=true" in str(exc)
+        return
+    raise AssertionError("startup accepted neither live nor dry-run order mode")
+
+
+def test_entry_boundary_config_requires_live_min_buy_limit(monkeypatch) -> None:
+    monkeypatch.delenv("MINIMAL_MIN_BUY_LIMIT", raising=False)
+    monkeypatch.setenv("MINIMAL_DECISION_MIN_TTE_US", "30000000")
+
+    try:
+        _entry_boundary_config()
+    except RuntimeError as exc:
+        assert "MINIMAL_MIN_BUY_LIMIT" in str(exc)
+        return
+    raise AssertionError("startup accepted missing MINIMAL_MIN_BUY_LIMIT")
+
+
+def test_entry_boundary_config_requires_live_no_entry_window(monkeypatch) -> None:
+    monkeypatch.setenv("MINIMAL_MIN_BUY_LIMIT", "0.10")
+    monkeypatch.delenv("MINIMAL_DECISION_MIN_TTE_US", raising=False)
+
+    try:
+        _entry_boundary_config()
+    except RuntimeError as exc:
+        assert "MINIMAL_DECISION_MIN_TTE_US" in str(exc)
+        return
+    raise AssertionError("startup accepted missing MINIMAL_DECISION_MIN_TTE_US")
+
+
+def test_entry_boundary_config_accepts_explicit_sane_bounds(monkeypatch) -> None:
+    monkeypatch.setenv("MINIMAL_MIN_BUY_LIMIT", "0.10")
+    monkeypatch.setenv("MINIMAL_MAX_BUY_LIMIT", "0.85")
+    monkeypatch.setenv("MINIMAL_DECISION_MIN_TTE_US", "30000000")
+
+    assert _entry_boundary_config() == (Decimal("0.10"), Decimal("0.85"), 30_000_000)
+
+
+def test_entry_decision_config_uses_same_min_max_buy_bounds(monkeypatch) -> None:
+    monkeypatch.setenv("MINIMAL_MAX_ASK", "0.60")
+
+    cfg = _entry_decision_cfg(Decimal("0.10"), Decimal("0.85"), 45_000_000)
+
+    assert cfg.min_ask == 0.10
+    assert cfg.max_ask == 0.85
+    assert cfg.min_tte_us == 45_000_000
+
+
+def test_startup_open_order_check_fails_closed_on_existing_orders() -> None:
+    class _Http:
+        async def dataapi_positions_abs_sum(self, _address: str):
+            return Decimal("0"), 0
+
+        async def clob_open_order_count(self):
+            return 1
+
+    try:
+        asyncio.run(ensure_flat_start(_Http(), "0xabc", allow_dirty_start=False))
+    except RuntimeError as exc:
+        assert "open Polymarket orders" in str(exc)
+        return
+    raise AssertionError("startup accepted existing open orders")
+
+
+def test_startup_position_override_flag_bypasses_dirty_state_checks() -> None:
     class _Http:
         async def dataapi_positions_abs_sum(self, _address: str):
             raise AssertionError("startup should not query historical positions")
+
+        async def clob_open_order_count(self):
+            raise AssertionError("startup should not query open orders")
 
     asyncio.run(ensure_flat_start(_Http(), "0xabc", allow_dirty_start=True))
 

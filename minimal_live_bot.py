@@ -17,6 +17,7 @@ import aiohttp
 from dotenv import load_dotenv
 from py_clob_client.client import ClobClient
 from py_clob_client.clob_types import ApiCreds
+from py_clob_client_v2 import ClobClient as ClobClientV2
 
 MINIMAL_ROOT = Path(__file__).resolve().parent
 
@@ -28,7 +29,7 @@ from basis_estimator import BasisEstimator, BasisEstimatorConfig
 from binance_signal_engine import BinanceSignalConfig
 from config import BotConfig
 from exit_policy import ExitPolicyConfig
-from fast_order_submitter import FastOrderSubmitter, HeaderSigner, prepare_template
+from fast_order_submitter import DryRunOrderSubmitter, FastOrderSubmitter, HeaderSigner, prepare_template
 from http_client import CLOBHttpClient
 from order_placer import MinimalOrderConfig, _env_float, _env_int
 from runtime_state import MinimalRuntimeState
@@ -87,6 +88,33 @@ def _float_env(name: str, default: float) -> float:
     return float(raw) if raw else default
 
 
+def _required_dec_env(name: str) -> Decimal:
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        raise RuntimeError(f"{name} is required for live entry boundary enforcement.")
+    return Decimal(raw)
+
+
+def _required_int_env(name: str) -> int:
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        raise RuntimeError(f"{name} is required for live entry boundary enforcement.")
+    return int(raw)
+
+
+def _entry_boundary_config() -> tuple[Decimal, Decimal, int]:
+    min_buy = _required_dec_env("MINIMAL_MIN_BUY_LIMIT")
+    max_buy = _dec_env("MINIMAL_MAX_BUY_LIMIT", os.getenv("MINIMAL_MAX_ASK", "0.60"))
+    min_tte_us = _required_int_env("MINIMAL_DECISION_MIN_TTE_US")
+    if min_buy <= 0:
+        raise RuntimeError("MINIMAL_MIN_BUY_LIMIT must be > 0.")
+    if max_buy <= min_buy:
+        raise RuntimeError("MINIMAL_MAX_BUY_LIMIT must be greater than MINIMAL_MIN_BUY_LIMIT.")
+    if min_tte_us <= 0:
+        raise RuntimeError("MINIMAL_DECISION_MIN_TTE_US must be > 0.")
+    return min_buy, max_buy, min_tte_us
+
+
 def _bool_env(name: str, default: bool) -> bool:
     raw = os.getenv(name, "").strip().lower()
     if not raw:
@@ -102,6 +130,19 @@ def _order_type_env(name: str, default: str = "FAK") -> str:
             f"{name}={order_type} is a resting order type. Set MINIMAL_ALLOW_RESTING_ORDERS=true intentionally."
         )
     return order_type
+
+
+def _dry_run_order_mode() -> bool:
+    dry_run = _bool_env("MINIMAL_DRY_RUN_ORDERS", False)
+    live_orders = _bool_env("POLY_ALLOW_LIVE_ORDERS", False)
+    if dry_run:
+        return True
+    if not live_orders:
+        raise RuntimeError(
+            "Refusing bot startup. Set POLY_ALLOW_LIVE_ORDERS=true for live orders "
+            "or MINIMAL_DRY_RUN_ORDERS=true for non-transactional smoke tests."
+        )
+    return False
 
 
 def _maybe_load_calibrated_model(path: Path, *, required: bool) -> CalibratedSignalModel | None:
@@ -127,8 +168,7 @@ def _ensure_calibrated_model(path: Path, *, required: bool) -> None:
 
 async def build_live_bot() -> LiveBot:
     load_dotenv(SCRIPT_ENV_FILE, override=True)
-    if not _bool_env("POLY_ALLOW_LIVE_ORDERS", False):
-        raise RuntimeError("Refusing live bot startup. Set POLY_ALLOW_LIVE_ORDERS=true intentionally.")
+    dry_run_orders = _dry_run_order_mode()
 
     signal_model_path = Path(os.getenv("MINIMAL_SIGNAL_MODEL_PATH", "").strip() or (
         Path(__file__).resolve().parent / "state" / "signal_model.json"
@@ -159,6 +199,13 @@ async def build_live_bot() -> LiveBot:
         )
     creds = await asyncio.to_thread(clob.create_or_derive_api_creds)
     clob.set_api_creds(creds)
+    v2_clob = ClobClientV2(
+        host=order_cfg.host,
+        key=order_cfg.private_key,
+        chain_id=order_cfg.chain_id,
+        signature_type=order_cfg.signature_type,
+        funder=order_cfg.funder or None,
+    )
     address = str(clob.get_address() or "")
     api_key = str(creds.api_key or "")
     api_secret = str(creds.api_secret or "")
@@ -172,27 +219,28 @@ async def build_live_bot() -> LiveBot:
         raise_for_status=False,
         skip_auto_headers={"User-Agent"},
         connector=aiohttp.TCPConnector(
-            limit=0,
+            limit=_env_int("POLY_HTTP_CONN_LIMIT", 8),
+            limit_per_host=_env_int("POLY_HTTP_CONN_LIMIT_PER_HOST", 8),
             ttl_dns_cache=_env_int("POLY_HTTP_DNS_TTL_S", 600),
-            keepalive_timeout=_env_float("POLY_HTTP_KEEPALIVE_S", 60.0),
+            use_dns_cache=True,
+            keepalive_timeout=_env_float("POLY_HTTP_KEEPALIVE_S", 75.0),
             enable_cleanup_closed=True,
             force_close=False,
         ),
     )
     signer = HeaderSigner(address=address, api_key=api_key, api_passphrase=api_passphrase, api_secret=api_secret)
-    submitter = FastOrderSubmitter(session, signer)
+    submitter = DryRunOrderSubmitter(session) if dry_run_orders else FastOrderSubmitter(session, signer)
 
     cfg = BotConfig.from_env()
-    dummy_creds = ApiCreds(api_key="DUMMY", api_secret="AA", api_passphrase="DUMMY")
     auth = L2Auth(
-        dummy_creds,
-        poly_address="0x0000000000000000000000000000000000000000",
+        ApiCreds(api_key=api_key, api_secret=api_secret, api_passphrase=api_passphrase),
+        poly_address=address,
         cache_max_entries=cfg.auth_cache_max_entries,
     )
     http = CLOBHttpClient(cfg, auth, logging.getLogger("minimal_live_bot.market_http"))
     await ensure_flat_start(
         http,
-        address,
+        order_cfg.funder or address,
         allow_dirty_start=_bool_env("MINIMAL_ALLOW_DIRTY_START", False),
     )
 
@@ -207,8 +255,9 @@ async def build_live_bot() -> LiveBot:
                 "_build_template requires an explicit `order_type`. "
                 "This is enforced to prevent accidental resting orders."
             )
+        kwargs.pop("owner", None)
         return await prepare_template(
-            clob,
+            v2_clob,
             owner=api_key,
             order_type=kwargs.pop("order_type"),
             post_only=bool(kwargs.pop("post_only", order_cfg.post_only)),
@@ -226,6 +275,7 @@ async def build_live_bot() -> LiveBot:
         Path(__file__).resolve().parent / "state" / "basis.json"
     ))
     basis_estimator = BasisEstimator.load(basis_path, basis_cfg)
+    min_buy_limit, max_buy_limit, min_entry_tte_us = _entry_boundary_config()
 
     runtime = build_runtime(
         RuntimeWiringConfig(owner=api_key, max_quote_age_ns=_int_env("MINIMAL_MAX_QUOTE_AGE_NS", 250_000_000)),
@@ -236,6 +286,8 @@ async def build_live_bot() -> LiveBot:
             usdc_per_trade=_dec_env("MINIMAL_USDC_PER_TRADE", "10"),
             entry_slippage=_dec_env("MINIMAL_ENTRY_SLIPPAGE", "0"),
             min_size=_dec_env("MINIMAL_MIN_SIZE", "0.01"),
+            min_buy_limit=min_buy_limit,
+            max_buy_limit=max_buy_limit,
             order_type=_order_type_env("MINIMAL_ENTRY_ORDER_TYPE", "FAK"),
             post_only=_bool_env("MINIMAL_ENTRY_POST_ONLY", order_cfg.post_only),
             reprice_hysteresis_pct=_dec_env("MINIMAL_REPRICE_HYSTERESIS_PCT", "0.002"),
@@ -252,14 +304,7 @@ async def build_live_bot() -> LiveBot:
         ),
         signal_cfg=_apply_signal_engine_overrides(_binance_signal_cfg(), calibrated_model),
         decision_cfg=_apply_decision_overrides(
-            SignalDecisionConfig(
-                max_ask=_float_env("MINIMAL_MAX_ASK", 0.60),
-                max_quote_age_us=_int_env("MINIMAL_DECISION_MAX_QUOTE_AGE_US", 250_000),
-                min_tte_us=_int_env("MINIMAL_DECISION_MIN_TTE_US", 2_000_000),
-                min_strength=_float_env("MINIMAL_DECISION_MIN_STRENGTH", 3.0),
-                min_edge=_float_env("MINIMAL_DECISION_MIN_EDGE", 0.0),
-                strength_price_scale=_float_env("MINIMAL_DECISION_STRENGTH_PRICE_SCALE", 0.03),
-            ),
+            _entry_decision_cfg(min_buy_limit, max_buy_limit, min_entry_tte_us),
             calibrated_model,
         ),
         now_s=time.time,
@@ -308,8 +353,43 @@ def _binance_signal_cfg() -> BinanceSignalConfig:
     )
 
 
+def _entry_decision_cfg(
+    min_buy_limit: Decimal,
+    max_buy_limit: Decimal,
+    min_entry_tte_us: int,
+) -> SignalDecisionConfig:
+    return SignalDecisionConfig(
+        max_ask=float(max_buy_limit),
+        min_ask=float(min_buy_limit),
+        max_quote_age_us=_int_env("MINIMAL_DECISION_MAX_QUOTE_AGE_US", 250_000),
+        min_tte_us=min_entry_tte_us,
+        min_strength=_float_env("MINIMAL_DECISION_MIN_STRENGTH", 3.0),
+        min_edge=_float_env("MINIMAL_DECISION_MIN_EDGE", 0.0),
+        strength_price_scale=_float_env("MINIMAL_DECISION_STRENGTH_PRICE_SCALE", 0.03),
+        prob_alpha_ofi=_float_env("MINIMAL_PROB_ALPHA_OFI", 0.0),
+        prob_beta_imb=_float_env("MINIMAL_PROB_BETA_IMB", 0.0),
+        prob_sigma_scale=_float_env("MINIMAL_PROB_SIGMA_SCALE", 1.5),
+        prob_sigma_floor_usd=_float_env("MINIMAL_PROB_SIGMA_FLOOR_USD", 5.0),
+        prob_floor=_float_env("MINIMAL_PROB_FLOOR", 0.02),
+        prob_ceil=_float_env("MINIMAL_PROB_CEIL", 0.98),
+        min_prob=_float_env("MINIMAL_PROB_MIN_PROB", 0.55),
+        max_tte_us=_int_env("MINIMAL_PROB_MAX_TTE_US", 600_000_000),
+        use_legacy_fair=_bool_env("MINIMAL_PROB_USE_LEGACY", False),
+    )
+
+
 async def ensure_flat_start(http, address: str, *, allow_dirty_start: bool) -> None:
-    return None
+    if allow_dirty_start:
+        return
+    # Historical positions are intentionally ignored (current-run-only design).
+    # Only resting open orders are checked: an old order could fill during this
+    # run and create invisible inventory that the bot never sold.
+    open_orders = await http.clob_open_order_count()
+    if open_orders > 0:
+        raise RuntimeError(
+            "Refusing startup with open Polymarket orders. "
+            f"open_orders={open_orders}. Cancel open orders or set MINIMAL_ALLOW_DIRTY_START=true for manual recovery."
+        )
 
 
 async def _exit_loop(runtime: _Runtime, interval_s: float) -> None:
@@ -515,7 +595,8 @@ async def run_live() -> None:
 
 
 def main() -> int:
-    logging.basicConfig(level=os.getenv("MINIMAL_LOG_LEVEL", "WARNING").upper())
+    load_dotenv(SCRIPT_ENV_FILE, override=True)
+    logging.basicConfig(level=os.getenv("MINIMAL_LOG_LEVEL", "WARNING").upper(), force=True)
     os.chdir(MINIMAL_ROOT)
     try:
         asyncio.run(run_live())

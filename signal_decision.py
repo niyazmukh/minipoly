@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 from binance_signal_engine import BinanceSignal
@@ -38,11 +39,26 @@ class MarketSignalContract:
 @dataclass(frozen=True, slots=True)
 class SignalDecisionConfig:
     max_ask: float
+    min_ask: float = 0.0
     max_quote_age_us: int = 250_000
     min_tte_us: int = 2_000_000
     min_strength: float = 3.0
     min_edge: float = 0.0
+    # Legacy heuristic fallback (used when prob model returns prob_unavailable
+    # AND prob_use_legacy is true).
     strength_price_scale: float = 0.03
+    # Probabilistic scaling — Brownian barrier-cross with order-flow tilts.
+    # P_yes = Phi((microprice - strike + alpha*OFI + beta*imbalance*sigma)
+    #             / (sigma_scale * sigma_px * sqrt(tte_s)))
+    prob_alpha_ofi: float = 0.0
+    prob_beta_imb: float = 0.0
+    prob_sigma_scale: float = 1.5
+    prob_sigma_floor_usd: float = 5.0
+    prob_floor: float = 0.02
+    prob_ceil: float = 0.98
+    min_prob: float = 0.55
+    max_tte_us: int = 600_000_000
+    use_legacy_fair: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,13 +91,31 @@ def decide_buy(
         return SignalDecision("NO_BUY", "quote_stale", side=side, token_id=token_id)
     if ask <= 0.0:
         return SignalDecision("NO_BUY", "invalid_ask", side=side, token_id=token_id)
+    if cfg.min_ask > 0.0 and ask < cfg.min_ask:
+        return SignalDecision("NO_BUY", "ask_below_limit", side=side, token_id=token_id)
     if cfg.max_ask > 0.0 and ask > cfg.max_ask:
         return SignalDecision("NO_BUY", "ask_above_limit", side=side, token_id=token_id)
     if signal.strength < cfg.min_strength:
         return SignalDecision("NO_BUY", "weak_signal", side=side, token_id=token_id)
 
-    fair = _strength_to_fair(signal.strength, cfg.strength_price_scale)
-    edge = fair - ask
+    if cfg.use_legacy_fair:
+        fair = _strength_to_fair(signal.strength, cfg.strength_price_scale)
+        edge = fair - ask
+        if edge < cfg.min_edge:
+            return SignalDecision("NO_BUY", "edge_below_min", side=side, token_id=token_id, edge=edge)
+        return SignalDecision("BUY", "edge_ok_legacy", side=side, token_id=token_id, edge=edge)
+
+    p_yes = _bs_prob_yes(signal, cfg, tte_us)
+    if p_yes is None:
+        return SignalDecision("NO_BUY", "prob_unavailable", side=side, token_id=token_id)
+
+    if side == "YES":
+        side_prob = p_yes
+    else:
+        side_prob = 1.0 - p_yes
+    if side_prob < cfg.min_prob:
+        return SignalDecision("NO_BUY", "prob_below_floor", side=side, token_id=token_id, edge=side_prob - ask)
+    edge = side_prob - ask
     if edge < cfg.min_edge:
         return SignalDecision("NO_BUY", "edge_below_min", side=side, token_id=token_id, edge=edge)
     return SignalDecision("BUY", "edge_ok", side=side, token_id=token_id, edge=edge)
@@ -97,3 +131,54 @@ def _strength_to_fair(strength: float, scale: float) -> float:
     if fair > 0.99:
         return 0.99
     return fair
+
+
+def _phi(z: float) -> float:
+    """Standard normal CDF using math.erf — no scipy dependency."""
+    return 0.5 * (1.0 + math.erf(z / math.sqrt(2.0)))
+
+
+def _bs_prob_yes(
+    signal: BinanceSignal,
+    cfg: SignalDecisionConfig,
+    tte_us: int,
+) -> float | None:
+    """Brownian barrier-cross probability that microprice closes >= strike at expiry.
+
+    P_yes = Phi(drift_eff / sigma_eff)
+      drift_eff = (microprice - strike) + alpha * ofi + beta * imbalance * sigma_px
+      sigma_eff = sigma_scale * sigma_px * sqrt(tte_s)
+
+    Returns None on missing/degenerate inputs. Caller treats None as
+    "prob_unavailable" and fails closed.
+    """
+    if signal.microprice <= 0.0 or signal.strike <= 0.0:
+        return None
+    if tte_us <= 0 or tte_us > cfg.max_tte_us:
+        return None
+    sigma_px = max(float(signal.sigma_px), float(cfg.prob_sigma_floor_usd))
+    if sigma_px <= 0.0:
+        return None
+    move_from_strike = float(signal.microprice) - float(signal.strike)
+    drift = (
+        move_from_strike
+        + float(cfg.prob_alpha_ofi) * float(signal.ofi)
+        + float(cfg.prob_beta_imb) * float(signal.imbalance) * sigma_px
+    )
+    tte_s = float(tte_us) / 1_000_000.0
+    sigma_eff = float(cfg.prob_sigma_scale) * sigma_px * math.sqrt(tte_s)
+    if sigma_eff <= 1e-9:
+        return None
+    z = drift / sigma_eff
+    if not math.isfinite(z):
+        return None
+    p = _phi(z)
+    if not math.isfinite(p):
+        return None
+    floor = max(0.0, min(1.0, float(cfg.prob_floor)))
+    ceil = max(floor, min(1.0, float(cfg.prob_ceil)))
+    if p < floor:
+        p = floor
+    elif p > ceil:
+        p = ceil
+    return p

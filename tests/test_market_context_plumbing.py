@@ -54,7 +54,7 @@ def _runtime(basis: BasisEstimator | None = None, signal_cfg: BinanceSignalConfi
     return rt, submitter
 
 
-def test_market_context_event_bootstraps_state_and_waits_for_binance_reference() -> None:
+def test_market_context_event_bootstraps_state_and_uses_polymarket_reference() -> None:
     rt, _ = _runtime()
     ctx = {
         "event_type": CONTEXT_EVENT_TYPE,
@@ -75,12 +75,12 @@ def test_market_context_event_bootstraps_state_and_waits_for_binance_reference()
     assert rt.state.market.condition_id == "cond-1"
     assert rt.state.trading_active is True
     assert rt.state.contract.is_valid is True
-    # Binance is the trend source; the signal threshold is captured from the
-    # first fresh Binance microprice for this market, not from Polymarket text.
-    assert rt.orchestrator.signal_engine.strike == 0.0
+    assert rt.orchestrator.signal_engine.strike == 40000.0
 
 
-def test_market_context_event_does_not_apply_basis_offset_as_binance_threshold() -> None:
+def test_market_context_event_uses_gamma_strike_without_basis_offset() -> None:
+    # BasisEstimator is now telemetry-only. The signal engine threshold equals
+    # the Gamma-supplied strike verbatim — basis no longer feeds back into it.
     basis = BasisEstimator(BasisEstimatorConfig(seed_basis=20.0, seed_weight=1.0))
     rt, _ = _runtime(basis)
     asyncio.run(
@@ -98,7 +98,7 @@ def test_market_context_event_does_not_apply_basis_offset_as_binance_threshold()
             }
         )
     )
-    assert rt.orchestrator.signal_engine.strike == 0.0
+    assert rt.orchestrator.signal_engine.strike == 40000.0
 
 
 def test_market_inactive_event_clears_state_and_armory() -> None:
@@ -164,7 +164,7 @@ def test_rotation_resets_signal_window_and_lock() -> None:
     )
 
     assert rt.orchestrator.signal_engine.snapshot().ticks == 0
-    assert rt.orchestrator.signal_engine.strike == 0.0
+    assert rt.orchestrator.signal_engine.strike == 41000.0
 
 
 def test_basis_updated_from_quote_when_yes_mid_near_50() -> None:
@@ -199,8 +199,8 @@ def test_basis_updated_from_quote_when_yes_mid_near_50() -> None:
     assert basis.initialized is True
     # microprice = (40015*1 + 40025*1)/2 = 40020. basis = 40020 - 40000 = 20.
     assert abs(basis.basis - 20.0) < 1e-6
-    # The market-start Binance reference is already the signal threshold.
-    assert abs(rt.orchestrator.signal_engine.strike - 40020.0) < 1e-6
+    # BasisEstimator is telemetry-only now: it must not move the engine's strike.
+    assert abs(rt.orchestrator.signal_engine.strike - 40000.0) < 1e-6
 
 
 def test_basis_ignores_stale_binance_microprice() -> None:

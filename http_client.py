@@ -1,12 +1,10 @@
-import csv
-import io
 import logging
 import time
-import zipfile
 from decimal import Decimal
 from typing import Any
 
 import aiohttp
+import orjson
 
 from auth import L2Auth
 from config import BotConfig
@@ -68,31 +66,57 @@ class CLOBHttpClient:
     async def dataapi_positions_abs_sum(self, user_address: str) -> tuple[Decimal, int]:
         if not user_address:
             return _DEC_ZERO, 0
-        url = f"https://data-api.polymarket.com/v1/accounting/snapshot?user={user_address}"
+        url = "https://data-api.polymarket.com/positions"
         try:
-            async with self._gamma.get(url) as resp:
+            async with self._gamma.get(
+                url,
+                params={
+                    "user": user_address,
+                    "sizeThreshold": "0",
+                    "limit": "500",
+                },
+            ) as resp:
                 if resp.status != 200:
-                    return _DEC_ZERO, 0
+                    raise RuntimeError(f"Data API positions check failed with HTTP {resp.status}")
                 payload = await resp.read()
         except Exception:
-            return _DEC_ZERO, 0
+            raise
 
         total_abs = _DEC_ZERO
         non_zero = 0
         try:
-            with zipfile.ZipFile(io.BytesIO(payload)) as zf:
-                names = [n for n in zf.namelist() if n.lower().endswith(".csv")]
-                if not names:
-                    return _DEC_ZERO, 0
-                with zf.open(names[0], "r") as fh:
-                    reader = csv.DictReader(io.TextIOWrapper(fh, encoding="utf-8", newline=""))
-                    for row in reader:
-                        raw = row.get("size") or row.get("quantity") or row.get("position") or row.get("amount")
-                        value = parse_decimal_amount(raw)
-                        if value == 0:
-                            continue
-                        total_abs += abs(value)
-                        non_zero += 1
-        except Exception:
-            return _DEC_ZERO, 0
+            data = orjson.loads(payload)
+        except orjson.JSONDecodeError as exc:
+            raise RuntimeError("Data API positions check returned invalid JSON") from exc
+        if not isinstance(data, list):
+            raise RuntimeError("Data API positions check returned a non-list payload")
+        for row in data:
+            if not isinstance(row, dict):
+                continue
+            value = parse_decimal_amount(row.get("size"))
+            if value == 0:
+                continue
+            total_abs += abs(value)
+            non_zero += 1
         return total_abs, non_zero
+
+    async def clob_open_order_count(self) -> int:
+        path = "/data/orders"
+        headers = self._auth.headers("GET", path, b"")
+        async with self._session.get(path, headers=headers) as resp:
+            raw = await resp.read()
+            if resp.status != 200:
+                raise RuntimeError(f"CLOB open-order check failed with HTTP {resp.status}")
+        try:
+            payload = orjson.loads(raw)
+        except orjson.JSONDecodeError as exc:
+            raise RuntimeError("CLOB open-order check returned invalid JSON") from exc
+        if not isinstance(payload, dict):
+            raise RuntimeError("CLOB open-order check returned a non-object payload")
+        data = payload.get("data")
+        data_count = len(data) if isinstance(data, list) else 0
+        try:
+            count = int(payload.get("count", data_count))
+        except (TypeError, ValueError):
+            count = data_count
+        return max(count, data_count)

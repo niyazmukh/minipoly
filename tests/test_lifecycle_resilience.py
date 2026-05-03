@@ -334,7 +334,32 @@ def test_expire_unknown_submits_converts_old_unknowns_to_failed() -> None:
 
     expired = tracker.expire_unknown_submits(now_ts=200.0, max_age_s=30.0)
     assert expired == [sid]
-    assert tracker.pending_submits[sid].status == "FAILED"
+    assert tracker.pending_submits[sid].status == "EXPIRED_UNKNOWN"
+
+
+def test_late_wss_order_after_unknown_expiry_still_binds_current_run_submit() -> None:
+    tracker = LocalOrderTracker(current_run_only=True)
+    sid = tracker.register_submit("entry", "yes", "BUY", Decimal("5"), Decimal("0.40"), now_ts=100.0)
+    tracker.mark_submit_unknown(sid, error="transport")
+    assert tracker.expire_unknown_submits(now_ts=200.0, max_age_s=30.0) == [sid]
+
+    changed = tracker.on_order_event(
+        {
+            "event_type": "order",
+            "id": "late-buy",
+            "asset_id": "yes",
+            "side": "BUY",
+            "original_size": "5",
+            "size_matched": "0",
+            "price": "0.40",
+            "status": "LIVE",
+            "timestamp": "201.0",
+        }
+    )
+
+    assert changed is not None
+    assert tracker.pending_submits[sid].status == "CONFIRMED"
+    assert tracker.pending_submits[sid].confirmed_order_id == "late-buy"
 
 
 # ---------------------------------------------------------------------------

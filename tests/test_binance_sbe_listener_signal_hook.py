@@ -19,6 +19,19 @@ class _WS:
         return self.frames.pop(0)
 
 
+class _YieldThenDoneWS:
+    def __init__(self, frame: bytes) -> None:
+        self.frame = frame
+        self.sent = False
+
+    async def recv(self) -> bytes:
+        if not self.sent:
+            self.sent = True
+            return self.frame
+        await asyncio.sleep(0)
+        raise RuntimeError("done")
+
+
 def _cfg() -> RuntimeConfig:
     return RuntimeConfig(
         ws_url="",
@@ -174,3 +187,90 @@ def test_consumer_callback_mode_suppresses_status_prints(monkeypatch) -> None:
     asyncio.run(_run())
 
     assert printed == []
+
+
+def test_consumer_does_not_await_async_field_hook_before_next_recv() -> None:
+    spec = _spec()
+    first = spec.header_struct.pack(spec.root_struct.size, spec.template_id) + spec.root_struct.pack(
+        4_000_000,
+        10,
+        103_000,
+        8_000,
+        103_200,
+        2_000,
+        -3,
+        -3,
+    )
+    second = spec.header_struct.pack(spec.root_struct.size, spec.template_id) + spec.root_struct.pack(
+        4_010_000,
+        11,
+        103_100,
+        8_000,
+        103_300,
+        2_000,
+        -3,
+        -3,
+    )
+    # Record dispatch synchronously at call time (before task runs) so that
+    # the assertion holds regardless of when or whether the task executes.
+    dispatched: list[int] = []
+
+    def slow_hook(_event_time_us, update_id, _bid, _ask, _bid_qty, _ask_qty):
+        dispatched.append(update_id)
+
+        async def _slow_work():
+            await asyncio.sleep(10)
+
+        return _slow_work()
+
+    async def _run() -> None:
+        try:
+            await asyncio.wait_for(
+                _consume_best_bid_ask(_WS([first, second]), _cfg(), spec, on_tick_fields=slow_hook),
+                timeout=0.05,
+            )
+        except (RuntimeError, asyncio.TimeoutError):
+            pass
+
+    asyncio.run(_run())
+
+    assert dispatched == [10, 11]
+
+
+def test_consumer_drains_async_callback_tasks_on_exit() -> None:
+    spec = _spec()
+    frame = spec.header_struct.pack(spec.root_struct.size, spec.template_id) + spec.root_struct.pack(
+        4_020_000,
+        12,
+        103_200,
+        8_000,
+        103_400,
+        2_000,
+        -3,
+        -3,
+    )
+
+    async def _run() -> None:
+        started = asyncio.Event()
+        cleanup_done = asyncio.Event()
+
+        def slow_hook(*_args):
+            async def _slow_work():
+                started.set()
+                try:
+                    await asyncio.sleep(10)
+                except asyncio.CancelledError:
+                    cleanup_done.set()
+                    raise
+
+            return _slow_work()
+
+        try:
+            await _consume_best_bid_ask(_YieldThenDoneWS(frame), _cfg(), spec, on_tick_fields=slow_hook)
+        except RuntimeError:
+            pass
+
+        assert started.is_set()
+        assert cleanup_done.is_set()
+
+    asyncio.run(_run())

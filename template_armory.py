@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 from dataclasses import dataclass
 from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR
@@ -13,6 +14,9 @@ from hot_path_engine import HotPathGuard
 _DEC_ZERO = Decimal("0")
 _DEC_ONE = Decimal("1")
 _CENT = Decimal("0.01")
+_MIN_CLOB_PRICE = Decimal("0.01")
+_MAX_CLOB_PRICE = Decimal("0.99")
+_LOG = logging.getLogger(__name__)
 
 
 class _Engine(Protocol):
@@ -36,11 +40,17 @@ def floor_to_2dp(value: Decimal) -> Decimal:
     return value.quantize(_CENT, rounding=ROUND_FLOOR)
 
 
+def ceil_to_2dp(value: Decimal) -> Decimal:
+    return value.quantize(_CENT, rounding=ROUND_CEILING)
+
+
 @dataclass(frozen=True, slots=True)
 class ArmoryConfig:
     usdc_per_trade: Decimal
     entry_slippage: Decimal = _DEC_ZERO
     min_size: Decimal = _CENT
+    min_buy_limit: Decimal = _MIN_CLOB_PRICE
+    max_buy_limit: Decimal = _MAX_CLOB_PRICE
     order_type: str = "FAK"
     post_only: bool = False
     reprice_hysteresis_pct: Decimal = Decimal("0.002")
@@ -119,9 +129,11 @@ class TemplateArmory:
             return False
 
         buy_limit = ceil_to_tick(ask + self._cfg.entry_slippage, tick)
-        if buy_limit <= 0:
+        min_buy_limit = max(_MIN_CLOB_PRICE, self._cfg.min_buy_limit)
+        max_buy_limit = min(_MAX_CLOB_PRICE, self._cfg.max_buy_limit)
+        if buy_limit < min_buy_limit or buy_limit > max_buy_limit:
             return False
-        size = floor_to_2dp(self._cfg.usdc_per_trade / buy_limit)
+        size = ceil_to_2dp(self._cfg.usdc_per_trade / buy_limit)
         if size < self._cfg.min_size:
             return False
 
@@ -168,6 +180,7 @@ class TemplateArmory:
                 )
                 guard = HotPathGuard(
                     max_ask=target.ask,
+                    min_ask=max(_MIN_CLOB_PRICE, self._cfg.min_buy_limit),
                     max_age_ns=self._cfg.max_quote_age_ns,
                 )
                 self._armed[key] = _ArmedState(
@@ -180,10 +193,10 @@ class TemplateArmory:
                 # Loop continues if a newer target was queued during signing.
         except asyncio.CancelledError:
             raise
-        except Exception:
+        except Exception as exc:
             # Drop pending state on failure so the next quote re-attempts.
             self._pending_target.pop(key, None)
-            raise
+            _LOG.warning("template_armory_rearm_failed signal=%s error=%r", key, exc)
 
     def reset(self) -> None:
         self._armed.clear()
@@ -191,6 +204,11 @@ class TemplateArmory:
         for task in list(self._inflight_task.values()):
             task.cancel()
         self._inflight_task.clear()
+
+    def retire(self, signal: str) -> None:
+        key = signal.upper()
+        self._armed.pop(key, None)
+        self._pending_target.pop(key, None)
 
     def _should_rearm(
         self,

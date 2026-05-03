@@ -87,10 +87,11 @@ class MinimalOrderConfig:
 
     @staticmethod
     def from_env() -> "MinimalOrderConfig":
-        if not _env_bool("POLY_ALLOW_LIVE_ORDERS", False):
+        if not _env_bool("POLY_ALLOW_LIVE_ORDERS", False) and not _env_bool("MINIMAL_DRY_RUN_ORDERS", False):
             raise RuntimeError(
                 "Refusing to initialize live order placer. Set POLY_ALLOW_LIVE_ORDERS=true "
-                "only when you intentionally want this probe to submit real CLOB orders."
+                "only when you intentionally want this probe to submit real CLOB orders, "
+                "or MINIMAL_DRY_RUN_ORDERS=true for non-transactional smoke tests."
             )
         # POLY_ORDER_TYPE was historically the entry default for the manual
         # probe. The autonomous runtime uses MINIMAL_ENTRY_ORDER_TYPE/

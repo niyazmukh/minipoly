@@ -1,6 +1,7 @@
 import argparse
 import asyncio
 import gc
+import inspect
 import os
 import struct
 import sys
@@ -382,6 +383,26 @@ def _scaled_to_float(mantissa: int, exponent: int) -> float:
     return float(mantissa) / float(10 ** (-exponent))
 
 
+def _consume_callback_task(task: asyncio.Task, tasks: set[asyncio.Task]) -> None:
+    tasks.discard(task)
+    if task.cancelled():
+        return
+    try:
+        exc = task.exception()
+    except asyncio.CancelledError:
+        return
+    if exc is not None:
+        _safe_print(f"callback_error={exc!r}")
+
+
+def _dispatch_callback_result(result: object, tasks: set[asyncio.Task]) -> None:
+    if not inspect.isawaitable(result):
+        return
+    task = asyncio.create_task(result)  # type: ignore[arg-type]
+    tasks.add(task)
+    task.add_done_callback(lambda done: _consume_callback_task(done, tasks))
+
+
 def _resolve_config(args: argparse.Namespace) -> RuntimeConfig:
     ws_url = (args.ws_url or os.getenv("BINANCE_SBE_WS") or "").strip()
     symbol = (args.symbol or os.getenv("BINANCE_SBE_SYMBOL") or "btcusdt").strip().lower()
@@ -448,99 +469,106 @@ async def _consume_best_bid_ask(
     next_status_ns = time.monotonic_ns() + status_interval_ns
     ticks = 0
     last_update_id = 0
+    callback_tasks: set[asyncio.Task] = set()
 
-    while True:
-        frame = await recv()
-        if type(frame) is not bytes:
-            continue
+    try:
+        while True:
+            frame = await recv()
+            if type(frame) is not bytes:
+                continue
 
-        view = memoryview(frame)
-        if len(view) < header_size:
-            continue
+            view = memoryview(frame)
+            if len(view) < header_size:
+                continue
 
-        header = header_unpack(view, 0)
-        template_id = int(header[template_id_idx])
-        if template_id != spec.template_id:
-            continue
+            header = header_unpack(view, 0)
+            template_id = int(header[template_id_idx])
+            if template_id != spec.template_id:
+                continue
 
-        block_length = int(header[block_length_idx])
-        payload_offset = header_size
-        if block_length < body_size:
-            continue
-        if len(view) < payload_offset + block_length:
-            continue
+            block_length = int(header[block_length_idx])
+            payload_offset = header_size
+            if block_length < body_size:
+                continue
+            if len(view) < payload_offset + block_length:
+                continue
 
-        body = body_unpack(view, payload_offset)
-        ticks += 1
+            body = body_unpack(view, payload_offset)
+            ticks += 1
 
-        event_time_us = int(body[event_time_idx])
-        update_id = int(body[update_id_idx])
-        price_exp = int(body[price_exp_idx])
-        qty_exp = int(body[qty_exp_idx])
-        bid_price = int(body[bid_price_idx])
-        bid_qty = int(body[bid_qty_idx])
-        ask_price = int(body[ask_price_idx])
-        ask_qty = int(body[ask_qty_idx])
+            event_time_us = int(body[event_time_idx])
+            update_id = int(body[update_id_idx])
+            price_exp = int(body[price_exp_idx])
+            qty_exp = int(body[qty_exp_idx])
+            bid_price = int(body[bid_price_idx])
+            bid_qty = int(body[bid_qty_idx])
+            ask_price = int(body[ask_price_idx])
+            ask_qty = int(body[ask_qty_idx])
 
-        if on_tick_fields is not None:
+            if on_tick_fields is not None:
+                bid_f = _scaled_to_float(bid_price, price_exp)
+                ask_f = _scaled_to_float(ask_price, price_exp)
+                bid_qty_f = _scaled_to_float(bid_qty, qty_exp)
+                ask_qty_f = _scaled_to_float(ask_qty, qty_exp)
+                tick_result = on_tick_fields(event_time_us, update_id, bid_f, ask_f, bid_qty_f, ask_qty_f)
+                _dispatch_callback_result(tick_result, callback_tasks)
+            elif on_tick is not None:
+                tick_result = on_tick(
+                    BinanceTick(
+                        event_time_us=event_time_us,
+                        update_id=update_id,
+                        bid=_scaled_to_float(bid_price, price_exp),
+                        ask=_scaled_to_float(ask_price, price_exp),
+                        bid_qty=_scaled_to_float(bid_qty, qty_exp),
+                        ask_qty=_scaled_to_float(ask_qty, qty_exp),
+                    )
+                )
+                _dispatch_callback_result(tick_result, callback_tasks)
+
+            if not status_enabled:
+                last_update_id = update_id
+                continue
+
+            now_ns = time.monotonic_ns()
+            if now_ns < next_status_ns:
+                last_update_id = update_id
+                continue
+            next_status_ns = now_ns + status_interval_ns
+
+            now_us = time.time_ns() // 1000
+            lag_us = now_us - event_time_us
+            spread_m = ask_price - bid_price
+            spread_f = _scaled_to_float(spread_m, price_exp)
             bid_f = _scaled_to_float(bid_price, price_exp)
             ask_f = _scaled_to_float(ask_price, price_exp)
             bid_qty_f = _scaled_to_float(bid_qty, qty_exp)
             ask_qty_f = _scaled_to_float(ask_qty, qty_exp)
-            tick_result = on_tick_fields(event_time_us, update_id, bid_f, ask_f, bid_qty_f, ask_qty_f)
-            if asyncio.iscoroutine(tick_result):
-                await tick_result
-        elif on_tick is not None:
-            tick_result = on_tick(
-                BinanceTick(
-                    event_time_us=event_time_us,
-                    update_id=update_id,
-                    bid=_scaled_to_float(bid_price, price_exp),
-                    ask=_scaled_to_float(ask_price, price_exp),
-                    bid_qty=_scaled_to_float(bid_qty, qty_exp),
-                    ask_qty=_scaled_to_float(ask_qty, qty_exp),
-                )
+
+            symbol = ""
+            if cfg.decode_symbol and spec.symbol_len_bytes > 0:
+                symbol = _decode_symbol(view, payload_offset + block_length, spec.symbol_len_bytes)
+            symbol_txt = f" symbol={symbol}" if symbol else ""
+
+            _safe_print(
+                "tick="
+                + str(ticks)
+                + f" lag_us={lag_us}"
+                + f" upd={update_id}"
+                + f" bid={bid_f:.8f}"
+                + f" ask={ask_f:.8f}"
+                + f" spread={spread_f:.8f}"
+                + f" bid_qty={bid_qty_f:.8f}"
+                + f" ask_qty={ask_qty_f:.8f}"
+                + symbol_txt
             )
-            if asyncio.iscoroutine(tick_result):
-                await tick_result
-
-        if not status_enabled:
             last_update_id = update_id
-            continue
-
-        now_ns = time.monotonic_ns()
-        if now_ns < next_status_ns:
-            last_update_id = update_id
-            continue
-        next_status_ns = now_ns + status_interval_ns
-
-        now_us = time.time_ns() // 1000
-        lag_us = now_us - event_time_us
-        spread_m = ask_price - bid_price
-        spread_f = _scaled_to_float(spread_m, price_exp)
-        bid_f = _scaled_to_float(bid_price, price_exp)
-        ask_f = _scaled_to_float(ask_price, price_exp)
-        bid_qty_f = _scaled_to_float(bid_qty, qty_exp)
-        ask_qty_f = _scaled_to_float(ask_qty, qty_exp)
-
-        symbol = ""
-        if cfg.decode_symbol and spec.symbol_len_bytes > 0:
-            symbol = _decode_symbol(view, payload_offset + block_length, spec.symbol_len_bytes)
-        symbol_txt = f" symbol={symbol}" if symbol else ""
-
-        _safe_print(
-            "tick="
-            + str(ticks)
-            + f" lag_us={lag_us}"
-            + f" upd={update_id}"
-            + f" bid={bid_f:.8f}"
-            + f" ask={ask_f:.8f}"
-            + f" spread={spread_f:.8f}"
-            + f" bid_qty={bid_qty_f:.8f}"
-            + f" ask_qty={ask_qty_f:.8f}"
-            + symbol_txt
-        )
-        last_update_id = update_id
+    finally:
+        if callback_tasks:
+            pending = list(callback_tasks)
+            for _t in pending:
+                _t.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
+            callback_tasks.clear()
 
 
 async def listen_forever(

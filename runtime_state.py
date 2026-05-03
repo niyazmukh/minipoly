@@ -23,6 +23,7 @@ class MinimalMarket:
     start_ts: float
     end_ts: float
     strike: float = 0.0
+    slug_ts: int = 0
 
 
 @dataclass(frozen=True, slots=True)
