@@ -61,6 +61,7 @@ class HotPathEngine:
         "_in_flight_buy",
         "_in_flight_sell",
         "_fired",
+        "_active_buy_assets",
         "_max_concurrent_positions",
     )
 
@@ -83,10 +84,12 @@ class HotPathEngine:
         self._in_flight_buy = False
         self._in_flight_sell = False
         self._fired: set[str] = set()
+        self._active_buy_assets: set[str] = set()
 
     def set_exposure_scope(self, token_ids: set[str] | frozenset[str]) -> None:
         self._armed.clear()
         self._fired.clear()
+        self._active_buy_assets.clear()
 
     def disarm_all(self) -> None:
         self._armed.clear()
@@ -138,14 +141,20 @@ class HotPathEngine:
             return HotPathResult(False, "quote_stale")
 
         if armed.side == "BUY" and self._tracker is not None:
-            # Count ALL positions regardless of scope, plus pending entry
-            # submits not yet reflected in owned_by_asset (WSS lag gap).
-            open_count = sum(
-                1 for aid, v in self._tracker.owned_by_asset.items()
-                if v > 0
-            )
-            open_count += self._tracker.count_pending_entries()
-            if open_count >= self._max_concurrent_positions:
+            # Count ALL positions: WSS-confirmed (owned_by_asset), pending
+            # submits (WSS lag gap), and in-memory active buys (authoritative
+            # — survives user-channel disconnection).
+            open_assets: set[str] = set()
+            open_assets.update(aid for aid, v in self._tracker.owned_by_asset.items() if v > 0)
+            open_assets.update(self._active_buy_assets)
+            # Only add pending entries for assets NOT already tracked above.
+            for pending in self._tracker.pending_submits.values():
+                if pending.intent != "entry":
+                    continue
+                if pending.status not in ("PENDING", "UNKNOWN", "CONFIRMED"):
+                    continue
+                open_assets.add(pending.asset_id)
+            if len(open_assets) >= self._max_concurrent_positions:
                 return HotPathResult(False, "max_positions")
 
         if armed.side == "BUY" and armed.guard.min_ask > 0 and quote.ask < armed.guard.min_ask:
@@ -202,13 +211,17 @@ class HotPathEngine:
                             now_ts=self._now_ns() / _NS_PER_S,
                         )
                     self._fired.add(key)
-                    if armed.side == "SELL" and self._tracker is not None:
-                        self._tracker.reserve_sell_order(
-                            order_id,
-                            template.token_id,
-                            armed.size,
-                            now_ts=start_ns / _NS_PER_S,
-                        )
+                    if armed.side == "BUY":
+                        self._active_buy_assets.add(template.token_id)
+                    elif armed.side == "SELL":
+                        self._active_buy_assets.discard(template.token_id)
+                        if self._tracker is not None:
+                            self._tracker.reserve_sell_order(
+                                order_id,
+                                template.token_id,
+                                armed.size,
+                                now_ts=start_ns / _NS_PER_S,
+                            )
                     end_ns = self._now_ns()
                     return HotPathResult(
                         submitted=True,
@@ -250,6 +263,8 @@ class HotPathEngine:
                 )
 
             # Definitive server rejection.
+            if armed.side == "BUY":
+                self._active_buy_assets.discard(template.token_id)
             if self._tracker is not None and submit_id:
                 self._tracker.mark_submit_failed(
                     submit_id,
@@ -266,6 +281,11 @@ class HotPathEngine:
         finally:
             if attempted_submit:
                 self.disarm(key)
+            # If we reach finally without having added to _active_buy_assets
+            # (exception or unknown path), the BUY didn't create a real position
+            # so it must not count against the concurrency cap.
+            if armed.side == "BUY" and not attempted_submit:
+                self._active_buy_assets.discard(template.token_id)
             if armed.side == "BUY":
                 self._in_flight_buy = False
             else:

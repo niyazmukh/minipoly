@@ -60,7 +60,7 @@ def _floor(entry: Decimal, bps: int) -> Decimal:
     return entry * (_DEC_ONE - (Decimal(int(bps)) / _BPS))
 
 
-def _price_at_tick(price: Decimal, tick: Decimal) -> Decimal:
+def price_at_tick(price: Decimal, tick: Decimal) -> Decimal:
     if tick <= 0:
         return price
     return (price / tick).to_integral_value(rounding=ROUND_DOWN) * tick
@@ -79,7 +79,7 @@ def _sell(
         side=position.side,
         token_id=position.token_id,
         size=size,
-        limit_price=_price_at_tick(quote.bid, quote.tick),
+        limit_price=price_at_tick(quote.bid, quote.tick),
         bid=quote.bid,
         ask=quote.ask,
         order_type=cfg.order_type,

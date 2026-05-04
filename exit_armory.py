@@ -117,7 +117,7 @@ class ExitArmory:
                     name=f"exit-{decision.reason}",
                     token_id=decision.token_id,
                     side="SELL",
-                    price=float(decision.limit_price),
+                    price=round(float(decision.limit_price), 2),
                     size=float(decision.size),
                     owner=self._owner,
                     order_type=decision.order_type,
