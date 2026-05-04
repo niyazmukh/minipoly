@@ -8,7 +8,7 @@ from typing import Any, Callable, Protocol
 
 from basis_estimator import BasisEstimator
 from binance_signal_engine import BinanceSignalConfig, BinanceSignalEngine
-from exit_policy import ExitDecision, ExitPolicyConfig, OpenPosition, decide_exit, price_at_tick
+from exit_policy import ExitDecision, ExitPolicyConfig, OpenPosition, decide_exit, sell_decision
 from order_tracker import LocalOrderTracker, TradeState
 from polymarket_market_feed import apply_market_event
 from runtime_state import MinimalMarket, MinimalRuntimeState
@@ -583,18 +583,7 @@ class MinimalBotOrchestrator:
         if position.size <= 0:
             return
         self._exit_armory.prepare_exit(
-            ExitDecision(
-                "SELL",
-                "prearm",
-                side=position.side,
-                token_id=position.token_id,
-                size=position.size,
-                limit_price=price_at_tick(quote.bid, quote.tick),
-                bid=quote.bid,
-                ask=quote.ask,
-                order_type=self._exit_cfg.order_type,
-                signal=self._exit_cfg.signal,
-            ),
+            sell_decision("prearm", position, quote, self._exit_cfg, position.size),
             quote_ts_ns=quote.ts_ns,
         )
 

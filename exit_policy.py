@@ -66,7 +66,7 @@ def price_at_tick(price: Decimal, tick: Decimal) -> Decimal:
     return (price / tick).to_integral_value(rounding=ROUND_DOWN) * tick
 
 
-def _sell(
+def sell_decision(
     reason: str,
     position: OpenPosition,
     quote: QuoteState,
@@ -111,11 +111,11 @@ def decide_exit(
 
     size = min(position.size, sellable_size)
     if tte_us <= cfg.force_exit_tte_us:
-        return _sell("expiry_ripcord", position, quote, cfg, size)
+        return sell_decision("expiry_ripcord", position, quote, cfg, size)
     if cfg.max_hold_us > 0 and (int(now_ns) - position.opened_ns) // 1000 >= cfg.max_hold_us:
-        return _sell("time_stop", position, quote, cfg, size)
+        return sell_decision("time_stop", position, quote, cfg, size)
     if quote.bid >= _target(position.entry_price, cfg.take_profit_bps):
-        return _sell("take_profit", position, quote, cfg, size)
+        return sell_decision("take_profit", position, quote, cfg, size)
     if cfg.stop_loss_bps > 0 and quote.bid <= _floor(position.entry_price, cfg.stop_loss_bps):
-        return _sell("stop_loss", position, quote, cfg, size)
+        return sell_decision("stop_loss", position, quote, cfg, size)
     return _hold("hold", position)
