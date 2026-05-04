@@ -39,8 +39,8 @@ Startup is intentionally guarded:
 - Sell decisions must use `LocalOrderTracker` sellable inventory from user-channel confirmations.
 - `LocalOrderTracker` now distinguishes:
   - `owned`: local exposure seen once a trade reaches `MATCHED`
-  - `sellable`: confirmed liquid inventory only; BUY size is not sellable until the same trade reaches `CONFIRMED`
-  This prevents the bot from trying to sell just-matched BUY fills before venue balance is actually available.
+  - `sellable`: MATCHED exposure is immediately sellable (no CONFIRMED wait). This lets exits fire faster — the venue accepts sells against just-matched inventory.
+  - `owned`: local exposure tracked from `MATCHED` onward.
 - Exit inventory is floored to the venue-supported `0.01` share quantum before
   it is treated as sellable or position-bearing. Residual dust below `0.01`
   remains in raw tracker accounting but does not trigger invalid zero-size SELL
