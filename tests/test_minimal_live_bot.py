@@ -47,9 +47,6 @@ class _Runtime:
         self.orchestrator = _Orchestrator()
 
 
-class _UnknownSubmitter:
-    async def submit(self, _template):
-        return {"success": False, "_http_status": 0, "error": "transport_error"}
 
 
 def _fast_template(*, token_id: str = "yes", side: str = "BUY") -> FastOrderTemplate:
@@ -134,32 +131,25 @@ def test_supervisor_cancels_siblings_on_listener_failure() -> None:
     assert cancelled == {"market": True, "binance": True}
 
 
-def test_expire_unknown_submits_once_releases_unknown_buy_cycle_lock() -> None:
+def test_expire_unknown_submits_once_clears_stale_unknowns() -> None:
     from minimal_live_bot import expire_unknown_submits_once
 
     tracker = LocalOrderTracker(current_run_only=True)
-    engine = HotPathEngine(submitter=_UnknownSubmitter(), tracker=tracker, now_ns=lambda: 1_000)
-    engine.set_exposure_scope({"yes", "no"})
-    engine.arm("YES", _fast_template(token_id="yes", side="BUY"), HotPathGuard(max_ask=Decimal("1")))
-    engine.arm("NO", _fast_template(token_id="no", side="BUY"), HotPathGuard(max_ask=Decimal("1")))
-    engine.update_quote("yes", bid=Decimal("0.39"), ask=Decimal("0.40"), ts_ns=1_000)
-    engine.update_quote("no", bid=Decimal("0.39"), ask=Decimal("0.40"), ts_ns=1_000)
-
-    first = asyncio.run(engine.on_signal("YES"))
-    blocked = asyncio.run(engine.on_signal("NO"))
-
-    assert first.reason == "submit_unknown"
-    assert blocked.reason == "open_exposure"
+    tracker.register_submit(
+        intent="entry", asset_id="yes", side="BUY",
+        size=Decimal("10"), price=Decimal("0.50"),
+        now_ts=1.0, order_id_hint="hint",
+    )
+    tracker.mark_submit_unknown("submit-1000000-1", error="transport_error")
 
     runtime = type("_RuntimeWithSubmitState", (), {})()
-    runtime.hot_path = engine
     runtime.tracker = tracker
 
+    assert tracker.has_unconfirmed_submits(intent="entry") is True
     expired = expire_unknown_submits_once(runtime, now_ts=lambda: 100.0, max_age_s=1.0)
-    retried = asyncio.run(engine.on_signal("NO"))
 
     assert expired == 1
-    assert retried.reason == "submit_unknown"
+    assert tracker.has_unconfirmed_submits(intent="entry") is False
 
 
 def test_binance_signal_config_uses_current_engine_field_names(monkeypatch) -> None:

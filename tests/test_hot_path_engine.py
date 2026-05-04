@@ -502,3 +502,78 @@ def test_submit_exception_marks_pending_unknown_and_returns_failure() -> None:
     assert result.submitted is False
     assert result.reason == "submit_unknown"
     assert list(tracker.pending_submits.values())[0].status == "UNKNOWN"
+
+
+def test_max_positions_counts_pending_entry_submits_during_wss_lag() -> None:
+    """Reproduction of audit finding: max_concurrent_positions=1, one accepted
+    BUY submit exists in tracker, but no WSS trade has arrived yet.  A second
+    BUY must be rejected because the pending entry submit ties up a slot."""
+    tracker = LocalOrderTracker()
+    # Simulate an accepted entry submit — order was placed, but WSS
+    # hasn't delivered MATCHED/CONFIRMED yet.  owned_by_asset is empty.
+    tracker.register_submit(
+        intent="entry",
+        asset_id="yes",
+        side="BUY",
+        size=Decimal("10"),
+        price=Decimal("0.50"),
+        now_ts=1.0,
+        order_id_hint="oid-first",
+    )
+    tracker.confirm_submit_order_id("submit-1000000-1", "oid-first", now_ts=1.0)
+
+    engine = HotPathEngine(
+        submitter=_Submitter(),
+        tracker=tracker,
+        now_ns=lambda: 1_000_000_000,
+        max_concurrent_positions=1,
+    )
+    engine.arm("YES", _template(token_id="yes", side="BUY"), HotPathGuard(max_ask=Decimal("1")))
+    engine.update_quote("yes", bid=Decimal("0.49"), ask=Decimal("0.50"), ts_ns=1_000_000_000)
+
+    result = asyncio.run(engine.on_signal("YES"))
+
+    # owned_by_asset is empty, but the pending entry submit counts toward cap.
+    assert result.submitted is False
+    assert result.reason == "max_positions"
+    assert tracker.count_pending_entries() == 1
+
+
+def test_pending_entry_excluded_when_already_owned() -> None:
+    """Pending entry submit for an asset that IS in owned_by_asset
+    should NOT double-count.  This is the steady-state after WSS catch-up."""
+    tracker = LocalOrderTracker()
+    # Establish ownership first (simulates WSS trade arrived)
+    tracker.on_trade_event({
+        "event_type": "trade",
+        "id": "t1",
+        "asset_id": "yes",
+        "side": "BUY",
+        "size": "10",
+        "price": "0.50",
+        "status": "MATCHED",
+    })
+    # Then register a matching pending submit (late arrival)
+    tracker.register_submit(
+        intent="entry",
+        asset_id="yes",
+        side="BUY",
+        size=Decimal("10"),
+        price=Decimal("0.50"),
+        now_ts=1.0,
+    )
+    engine = HotPathEngine(
+        submitter=_Submitter(),
+        tracker=tracker,
+        now_ns=lambda: 1_000_000_000,
+        max_concurrent_positions=1,
+    )
+    engine.arm("NO", _template(token_id="no", side="BUY"), HotPathGuard(max_ask=Decimal("1")))
+    engine.update_quote("no", bid=Decimal("0.49"), ask=Decimal("0.50"), ts_ns=1_000_000_000)
+
+    result = asyncio.run(engine.on_signal("NO"))
+
+    # The pending entry is for "yes" which is already owned — count is 1.
+    # "no" is a new asset, so cap of 1 is exceeded.
+    assert result.submitted is False
+    assert result.reason == "max_positions"

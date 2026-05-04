@@ -82,18 +82,20 @@ class CalibratedSignalModel:
 
     def apply_to_decision(self, cfg: SignalDecisionConfig) -> SignalDecisionConfig:
         ov = self.decision
-        return SignalDecisionConfig(
-            max_ask=cfg.max_ask if ov.max_ask is None else float(ov.max_ask),
-            max_quote_age_us=cfg.max_quote_age_us if ov.max_quote_age_us is None else int(ov.max_quote_age_us),
-            min_tte_us=cfg.min_tte_us if ov.min_tte_us is None else int(ov.min_tte_us),
-            min_strength=cfg.min_strength if ov.min_strength is None else float(ov.min_strength),
-            min_edge=cfg.min_edge if ov.min_edge is None else float(ov.min_edge),
-            strength_price_scale=(
-                cfg.strength_price_scale
-                if ov.strength_price_scale is None
-                else float(ov.strength_price_scale)
-            ),
-        )
+        overrides: dict[str, Any] = {}
+        if ov.max_ask is not None:
+            overrides["max_ask"] = float(ov.max_ask)
+        if ov.max_quote_age_us is not None:
+            overrides["max_quote_age_us"] = int(ov.max_quote_age_us)
+        if ov.min_tte_us is not None:
+            overrides["min_tte_us"] = int(ov.min_tte_us)
+        if ov.min_strength is not None:
+            overrides["min_strength"] = float(ov.min_strength)
+        if ov.min_edge is not None:
+            overrides["min_edge"] = float(ov.min_edge)
+        if ov.strength_price_scale is not None:
+            overrides["strength_price_scale"] = float(ov.strength_price_scale)
+        return dataclasses.replace(cfg, **overrides)
 
     def apply_to_signal_engine(self, cfg: BinanceSignalConfig) -> BinanceSignalConfig:
         ov = self.signal_engine

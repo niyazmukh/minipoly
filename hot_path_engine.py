@@ -4,7 +4,7 @@ from decimal import Decimal
 from typing import Any, Callable, Protocol
 
 from fast_order_submitter import FastOrderTemplate, extract_order_id
-from order_tracker import LocalOrderTracker, _TERMINAL_ORDER_STATUSES
+from order_tracker import LocalOrderTracker
 
 
 _DEC_ZERO = Decimal("0")
@@ -49,19 +49,7 @@ class HotPathResult:
 
 
 class HotPathEngine:
-    """Submits armed templates on signal with strict guards.
-
-    Buy-cycle locking semantics
-    ---------------------------
-    After a successful BUY submit the engine refuses further BUYs for the
-    active market until either:
-      (a) the tracker reports the submitted order in a terminal state with
-          zero size matched (e.g. rejected/expired/canceled with no fill); or
-      (b) exposure has been seen on the active market and is now back to
-          flat (i.e. fill -> sell -> flat round trip completed).
-    A scope change (new market) clears the lock; old-market unsold tokens do
-    not block new-market buys because the scope filter excludes them.
-    """
+    """Submits armed templates on signal with strict guards."""
 
     __slots__ = (
         "_submitter",
@@ -73,11 +61,6 @@ class HotPathEngine:
         "_in_flight_buy",
         "_in_flight_sell",
         "_fired",
-        "_buy_cycle_locked",
-        "_buy_cycle_seen_exposure",
-        "_buy_cycle_order_id",
-        "_buy_cycle_trade_count_baseline",
-        "_exposure_token_ids",
         "_max_concurrent_positions",
     )
 
@@ -100,28 +83,8 @@ class HotPathEngine:
         self._in_flight_buy = False
         self._in_flight_sell = False
         self._fired: set[str] = set()
-        self._buy_cycle_locked = False
-        self._buy_cycle_seen_exposure = False
-        self._buy_cycle_order_id: str = ""
-        self._buy_cycle_trade_count_baseline: int = 0
-        self._exposure_token_ids: frozenset[str] = frozenset()
 
     def set_exposure_scope(self, token_ids: set[str] | frozenset[str]) -> None:
-        next_scope = frozenset(t for t in token_ids if t)
-        if next_scope == self._exposure_token_ids:
-            return
-        self._exposure_token_ids = next_scope
-        # Market rotated: clear any stale lock and armed templates. Old-market
-        # tokens stay in the tracker but are no longer in scope, so they cannot
-        # block fresh buys.
-        self._buy_cycle_locked = False
-        self._buy_cycle_seen_exposure = False
-        self._buy_cycle_order_id = ""
-        self._buy_cycle_trade_count_baseline = (
-            self._tracker.trade_count_in_scope(self._exposure_token_ids)
-            if self._tracker is not None
-            else 0
-        )
         self._armed.clear()
         self._fired.clear()
 
@@ -163,15 +126,6 @@ class HotPathEngine:
             return HotPathResult(False, "buy_in_flight")
         if armed.side == "SELL" and self._in_flight_sell:
             return HotPathResult(False, "sell_in_flight")
-        if armed.side == "BUY" and self._tracker is not None:
-            # Count ALL positions regardless of scope — positions from
-            # previous markets still tie up capital until confirmed sold.
-            open_count = sum(
-                1 for aid, v in self._tracker.owned_by_asset.items()
-                if v > 0
-            )
-            if open_count >= self._max_concurrent_positions:
-                return HotPathResult(False, "max_positions")
 
         template = armed.template
         quote = self._quotes.get(template.token_id)
@@ -182,6 +136,18 @@ class HotPathEngine:
         age_ns = start_ns - quote.ts_ns
         if age_ns < 0 or age_ns > max_age_ns:
             return HotPathResult(False, "quote_stale")
+
+        if armed.side == "BUY" and self._tracker is not None:
+            # Count ALL positions regardless of scope, plus pending entry
+            # submits not yet reflected in owned_by_asset (WSS lag gap).
+            open_count = sum(
+                1 for aid, v in self._tracker.owned_by_asset.items()
+                if v > 0
+            )
+            open_count += self._tracker.count_pending_entries()
+            if open_count >= self._max_concurrent_positions:
+                return HotPathResult(False, "max_positions")
+
         if armed.side == "BUY" and armed.guard.min_ask > 0 and quote.ask < armed.guard.min_ask:
             return HotPathResult(False, "ask_below_guard")
         if armed.guard.max_ask > 0 and (quote.ask <= 0 or quote.ask > armed.guard.max_ask):
@@ -305,16 +271,6 @@ class HotPathEngine:
             else:
                 self._in_flight_sell = False
 
-    def _engage_buy_cycle_lock(self, order_id: str) -> None:
-        self._buy_cycle_locked = True
-        self._buy_cycle_seen_exposure = False
-        self._buy_cycle_order_id = order_id
-        self._buy_cycle_trade_count_baseline = (
-            self._tracker.trade_count_in_scope(self._exposure_token_ids)
-            if self._tracker is not None
-            else 0
-        )
-
     def _handle_unknown_submit(
         self,
         armed: ArmedTemplate,
@@ -325,9 +281,6 @@ class HotPathEngine:
     ) -> None:
         if self._tracker is not None and submit_id:
             self._tracker.mark_submit_unknown(submit_id, error=error)
-        # BUY unknown: no longer engages cycle lock since multi-position
-        # support removes the single-position constraint. The pending
-        # submit is tracked and expired by the runtime supervisor.
         if armed.side == "BUY":
             return
         # SELL unknown: provisionally reserve inventory under the submit_id
@@ -341,64 +294,6 @@ class HotPathEngine:
                 armed.size,
                 now_ts=start_ns / _NS_PER_S,
             )
-
-    def release_expired_unknown_buy_lock(self) -> bool:
-        """Clear a BUY cycle lock after its UNKNOWN submit has expired."""
-        if not self._buy_cycle_locked or self._buy_cycle_order_id:
-            return False
-        tracker = self._tracker
-        scope = self._exposure_token_ids or None
-        if tracker is not None:
-            if tracker.has_open_exposure(scope):
-                self._buy_cycle_seen_exposure = True
-                return False
-            if tracker.has_unconfirmed_submits(intent="entry", asset_ids=scope):
-                return False
-        self._reset_lock()
-        return True
-
-    def _buy_blocked_by_open_exposure(self) -> bool:
-        scope = self._exposure_token_ids or None
-        tracker = self._tracker
-        if tracker is not None and tracker.has_open_exposure(scope):
-            self._buy_cycle_locked = True
-            self._buy_cycle_seen_exposure = True
-            return True
-        if not self._buy_cycle_locked:
-            return False
-        # Lock is set, no current exposure. Three release paths:
-        # 1) We previously observed exposure during a check; it has now drained.
-        if self._buy_cycle_seen_exposure:
-            self._reset_lock()
-            return False
-        # 2) New trades for in-scope tokens occurred since the lock was set,
-        # AND we are currently flat in scope. Covers fast fill->sell cycles
-        # that completed entirely between two `on_signal` calls without ever
-        # being observed mid-flight. Restricted to in-scope trades so trades
-        # for old/closed markets cannot unlock a fresh cycle (D6).
-        if tracker is not None:
-            current_count = tracker.trade_count_in_scope(self._exposure_token_ids)
-            if current_count > self._buy_cycle_trade_count_baseline:
-                self._reset_lock()
-                return False
-        # 3) The submitted BUY reached a terminal state with zero fill (no
-        # exposure ever existed). Covers rejection, expiry, and cancel.
-        if tracker is not None and self._buy_cycle_order_id:
-            order = tracker.orders.get(self._buy_cycle_order_id)
-            if order is not None and order.status in _TERMINAL_ORDER_STATUSES and order.size_matched <= 0:
-                self._reset_lock()
-                return False
-        return True
-
-    def _reset_lock(self) -> None:
-        self._buy_cycle_locked = False
-        self._buy_cycle_seen_exposure = False
-        self._buy_cycle_order_id = ""
-        self._buy_cycle_trade_count_baseline = (
-            self._tracker.trade_count_in_scope(self._exposure_token_ids)
-            if self._tracker is not None
-            else 0
-        )
 
 
 def _accepted_submit(response: dict[str, Any], order_id: str) -> bool:

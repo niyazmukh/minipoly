@@ -378,7 +378,6 @@ def _entry_decision_cfg(
         prob_floor=_float_env("MINIMAL_PROB_FLOOR", 0.02),
         prob_ceil=_float_env("MINIMAL_PROB_CEIL", 0.98),
         min_prob=_float_env("MINIMAL_PROB_MIN_PROB", 0.55),
-        min_edge_cheap=_float_env("MINIMAL_PROB_MIN_EDGE_CHEAP", 0.05),
         max_tte_us=_int_env("MINIMAL_PROB_MAX_TTE_US", 600_000_000),
         use_legacy_fair=_bool_env("MINIMAL_PROB_USE_LEGACY", False),
     )

@@ -10,7 +10,7 @@ The intended deployment target is one Python asyncio process on AWS Ubuntu EC2. 
 - Runtime state, local inventory, entry armory, exit armory, and hot-path order submitter are wired by `runtime_wiring.build_runtime(...)`.
 - Stale live orders are cancelled by a slow supervisor loop using `LocalOrderTracker.stale_live_order_ids(...)` and `FastOrderSubmitter.cancel_orders(...)`.
 - Shutdown cancels locally tracked live orders before closing HTTP clients, so an EC2 stop/restart does not intentionally leave known live orders behind.
-- Buy submission is single-position by design: after a buy submits, further buys are blocked until the tracker sees the position sold and exposure returns flat.
+- Buy submission is multi-position by design: up to `MINIMAL_MAX_CONCURRENT_POSITIONS` (default 3) concurrent entries are allowed across all market scopes.  The cap counts confirmed owned positions plus pending entry submits not yet reflected in WSS-owned inventory.
 
 Callback mode is the production shape. It avoids subprocess fan-out, stdout parsing, per-event pretty JSON formatting, and runtime log writes. Standalone CLI mode remains available for manual debugging and packet inspection.
 
@@ -45,7 +45,7 @@ Startup is intentionally guarded:
   it is treated as sellable or position-bearing. Residual dust below `0.01`
   remains in raw tracker accounting but does not trigger invalid zero-size SELL
   attempts or block new entries as false open exposure.
-- Buy decisions must respect the one-unsold-position rule through `HotPathEngine` and `LocalOrderTracker.has_open_exposure()`.
+- Buy decisions must respect the `max_concurrent_positions` cap through `HotPathEngine` and `LocalOrderTracker.count_pending_entries()`.
 - Buy decisions must use the same explicit min/max entry-price and no-entry TTE boundaries in `SignalDecisionConfig`, `TemplateArmory`, and `HotPathGuard`; do not rely on permissive defaults for live trading.
 - Stale order cancellation must stay off the signal hot path; it runs as a separate periodic supervisor task.
 - Shutdown order cancellation is a lifecycle cleanup step, not a per-event operation.

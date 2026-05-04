@@ -408,6 +408,25 @@ class LocalOrderTracker:
             return True
         return False
 
+    def count_pending_entries(self) -> int:
+        """Assets with live entry submits not yet reflected in owned_by_asset.
+
+        During the WSS gap between submit-accepted and trade-CONFIRMED,
+        owned_by_asset is blind.  Counting these pending submissions prevents
+        duplicate entries when max_concurrent_positions would otherwise pass
+        a second BUY before the first trade lands.
+        """
+        pending_assets: set[str] = set()
+        for pending in self.pending_submits.values():
+            if pending.intent != "entry":
+                continue
+            if pending.status not in ("PENDING", "UNKNOWN", "CONFIRMED"):
+                continue
+            if self.owned(pending.asset_id) > 0:
+                continue
+            pending_assets.add(pending.asset_id)
+        return len(pending_assets)
+
     def owned(self, asset_id: str) -> Decimal:
         return self.owned_by_asset.get(asset_id, _DEC_ZERO)
 

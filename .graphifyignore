@@ -1,12 +1,32 @@
-docs/
-tests/
-venv/
-state/
-.ssh_tmp/
-__pycache__/
-.pytest_cache/
-.claude/
-graphify-out/
+# Credentials — Polymarket private key, API secrets
+.env.poly
+.env*
+
+# Git internals
 .git/
-*.log
+
+# Agent instructions (separate context, not codebase)
+.claude/
+
+# Graphify's own output (prevents self-referencing loops)
+graphify-out/
+
+# Tests (separate codebase from test corpus)
+tests/
+
+# Documentation (prose, not code — graphify separately if needed)
+docs/
+
+# SSH keys
+.ssh_tmp/
 *.pem
+
+# Python bytecode cache
+__pycache__/
+*.pyc
+
+# Pytest cache
+.pytest_cache/
+
+# Shell scripts (not Python code corpus)
+*.sh

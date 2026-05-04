@@ -64,7 +64,7 @@ MINIMAL_MAX_CONCURRENT_POSITIONS=3
 - **`MINIMAL_ALLOW_RESTING_ORDERS=true`** required for GTC exits.
 - **`deferExec: false`** set on every order body — explicit opt-out of Polymarket deferral.
 - **Max 3 concurrent positions** across all market scopes — prevents runaway entries.
-- **Multi-position exit**: `evaluate_exit` iterates all tracker positions, not just `state.position`. Positions are evaluated independently.
+- **Multi-position exit**: `evaluate_exit` iterates all tracker positions, not just `state.position`. Each position is evaluated independently, but only ONE sell is submitted per tick (sequential single-flight exit).
 - **Stop-loss disabled** (`MINIMAL_STOP_LOSS_BPS=0`). Code skips the check when bps ≤ 0 — previously 0 bps meant "stop at entry price" which triggered from bid-ask spread.
 - **"not enough balance" cooldown**: exits that hit venue balance errors are suppressed for 2s to let Polymarket settlement complete. Polymarket confirms trades (user channel CONFIRMED) before tokens settle in wallet.
 - **SELL inventory = CONFIRMED only** (not MATCHED), floored to 0.01 share quantum.
