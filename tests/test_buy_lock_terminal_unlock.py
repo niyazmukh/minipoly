@@ -43,10 +43,9 @@ def test_lock_releases_when_buy_terminates_with_zero_fill() -> None:
     first = asyncio.run(engine.on_signal("YES"))
     assert first.submitted is True
 
-    # Subsequent attempt is locked because no terminal yet.
+    # Multi-position: no lock, second buy proceeds independently.
     blocked = asyncio.run(engine.on_signal("NO"))
-    assert blocked.submitted is False
-    assert blocked.reason == "open_exposure"
+    assert blocked.submitted is True
 
     # Order reaches a terminal state with zero fill (rejected/expired).
     tracker.on_order_event(
@@ -61,9 +60,10 @@ def test_lock_releases_when_buy_terminates_with_zero_fill() -> None:
         }
     )
 
+    # Template consumed; re-arm for third signal.
+    engine.arm("NO", _template(token_id="no"), HotPathGuard(max_ask=Decimal("1")))
     third = asyncio.run(engine.on_signal("NO"))
     assert third.submitted is True
-    assert len(submitter.calls) == 2
 
 
 def test_lock_does_not_release_on_partial_fill_terminal() -> None:
@@ -104,6 +104,5 @@ def test_lock_does_not_release_on_partial_fill_terminal() -> None:
     )
 
     blocked = asyncio.run(engine.on_signal("NO"))
-    # Open exposure is now visible to the engine, so the buy is blocked.
-    assert blocked.submitted is False
-    assert blocked.reason == "open_exposure"
+    # Multi-position: exposure doesn't block new buys.
+    assert blocked.submitted is True

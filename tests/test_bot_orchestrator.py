@@ -282,6 +282,17 @@ def test_orchestrator_arms_and_fires_exit_when_policy_triggers() -> None:
             "status": "MATCHED",
         }
     )
+    tracker.on_trade_event(
+        {
+            "event_type": "trade",
+            "id": "buy-1",
+            "asset_id": "yes",
+            "side": "BUY",
+            "size": "6",
+            "price": "0.50",
+            "status": "CONFIRMED",
+        }
+    )
     bot.configure_exit_policy(
         ExitPolicyConfig(take_profit_bps=1000, stop_loss_bps=1500),
         exit_armory=exit_armory,
@@ -328,7 +339,7 @@ def test_orchestrator_derives_position_from_user_wss_buy_before_exit_can_arm() -
 
     before_confirm = asyncio.run(bot.evaluate_exit())
     assert before_confirm.action == "HOLD"
-    assert before_confirm.reason == "no_position"
+    assert before_confirm.reason == "no_sellable_position"
     assert hot_path.signals == []
 
     asyncio.run(
@@ -345,11 +356,29 @@ def test_orchestrator_derives_position_from_user_wss_buy_before_exit_can_arm() -
         )
     )
 
-    decision = asyncio.run(bot.evaluate_exit())
-
     assert bot.state.position is not None
     assert bot.state.position.size == Decimal("7")
     assert bot.state.position.entry_price == Decimal("0.50")
+    matched_only = asyncio.run(bot.evaluate_exit())
+    assert matched_only.action == "HOLD"
+    assert matched_only.reason == "no_sellable_position"
+
+    asyncio.run(
+        bot.on_user_event(
+            {
+                "event_type": "trade",
+                "id": "buy-2",
+                "asset_id": "yes",
+                "side": "BUY",
+                "size": "7",
+                "price": "0.50",
+                "status": "CONFIRMED",
+            }
+        )
+    )
+
+    decision = asyncio.run(bot.evaluate_exit())
+
     assert decision.action == "SELL"
     assert decision.size == Decimal("7")
     assert hot_path.signals[-1] == "EXIT"
@@ -368,6 +397,17 @@ def test_orchestrator_blocks_entry_and_exit_when_market_inactive() -> None:
             "size": "5",
             "price": "0.50",
             "status": "MATCHED",
+        }
+    )
+    tracker.on_trade_event(
+        {
+            "event_type": "trade",
+            "id": "buy-3",
+            "asset_id": "yes",
+            "side": "BUY",
+            "size": "5",
+            "price": "0.50",
+            "status": "CONFIRMED",
         }
     )
     bot.configure_exit_policy(
@@ -418,6 +458,17 @@ def test_exit_sync_checks_current_position_token_without_scanning_both_sides() -
             "size": "5",
             "price": "0.50",
             "status": "MATCHED",
+        }
+    )
+    tracker.on_trade_event(
+        {
+            "event_type": "trade",
+            "id": "buy-current",
+            "asset_id": "yes",
+            "side": "BUY",
+            "size": "5",
+            "price": "0.50",
+            "status": "CONFIRMED",
         }
     )
     bot.configure_exit_policy(

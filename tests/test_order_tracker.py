@@ -7,7 +7,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from order_tracker import LocalOrderTracker
 
 
-def test_tracker_derives_sellable_and_weighted_entry_from_matched_buy_trades() -> None:
+def test_tracker_derives_sellable_and_weighted_entry_from_confirmed_buy_trades() -> None:
     tracker = LocalOrderTracker()
 
     tracker.on_trade_event(
@@ -21,6 +21,19 @@ def test_tracker_derives_sellable_and_weighted_entry_from_matched_buy_trades() -
             "status": "MATCHED",
         }
     )
+    assert tracker.owned("yes") == Decimal("4")
+    assert tracker.sellable("yes") == Decimal("0")
+    tracker.on_trade_event(
+        {
+            "event_type": "trade",
+            "id": "t1",
+            "asset_id": "yes",
+            "side": "BUY",
+            "size": "4",
+            "price": "0.40",
+            "status": "CONFIRMED",
+        }
+    )
     tracker.on_trade_event(
         {
             "event_type": "trade",
@@ -30,6 +43,17 @@ def test_tracker_derives_sellable_and_weighted_entry_from_matched_buy_trades() -
             "size": "6",
             "price": "0.50",
             "status": "MATCHED",
+        }
+    )
+    tracker.on_trade_event(
+        {
+            "event_type": "trade",
+            "id": "t2",
+            "asset_id": "yes",
+            "side": "BUY",
+            "size": "6",
+            "price": "0.50",
+            "status": "CONFIRMED",
         }
     )
 
@@ -53,6 +77,17 @@ def test_tracker_reduces_cost_basis_when_confirmed_sell_matches() -> None:
     tracker.on_trade_event(
         {
             "event_type": "trade",
+            "id": "buy",
+            "asset_id": "yes",
+            "side": "BUY",
+            "size": "10",
+            "price": "0.50",
+            "status": "CONFIRMED",
+        }
+    )
+    tracker.on_trade_event(
+        {
+            "event_type": "trade",
             "id": "sell",
             "asset_id": "yes",
             "side": "SELL",
@@ -64,7 +99,74 @@ def test_tracker_reduces_cost_basis_when_confirmed_sell_matches() -> None:
 
     assert tracker.owned("yes") == Decimal("6")
     assert tracker.sellable("yes") == Decimal("6")
+
+    tracker.on_trade_event(
+        {
+            "event_type": "trade",
+            "id": "sell",
+            "asset_id": "yes",
+            "side": "SELL",
+            "size": "4",
+            "price": "0.60",
+            "status": "CONFIRMED",
+        }
+    )
+
     assert tracker.average_entry_price("yes") == Decimal("0.50")
+
+
+def test_tracker_ignores_subquantum_sellable_dust_for_exit_and_exposure() -> None:
+    tracker = LocalOrderTracker()
+    tracker.on_trade_event(
+        {
+            "event_type": "trade",
+            "id": "buy",
+            "asset_id": "yes",
+            "side": "BUY",
+            "size": "2.777776",
+            "price": "0.45",
+            "status": "MATCHED",
+        }
+    )
+    tracker.on_trade_event(
+        {
+            "event_type": "trade",
+            "id": "buy",
+            "asset_id": "yes",
+            "side": "BUY",
+            "size": "2.777776",
+            "price": "0.45",
+            "status": "CONFIRMED",
+        }
+    )
+    tracker.on_trade_event(
+        {
+            "event_type": "trade",
+            "id": "sell",
+            "asset_id": "yes",
+            "side": "SELL",
+            "size": "2.77",
+            "price": "0.36",
+            "status": "MATCHED",
+        }
+    )
+    tracker.on_trade_event(
+        {
+            "event_type": "trade",
+            "id": "sell",
+            "asset_id": "yes",
+            "side": "SELL",
+            "size": "2.77",
+            "price": "0.36",
+            "status": "CONFIRMED",
+        }
+    )
+
+    assert tracker.owned("yes") == Decimal("0.007776")
+    assert tracker.sellable("yes") == Decimal("0")
+    assert tracker.can_sell("yes", Decimal("0.01")) is False
+    assert tracker.position_size_and_entry("yes") == (Decimal("0"), Decimal("0"))
+    assert tracker.has_open_exposure({"yes"}) is False
 
 
 def test_local_sell_reservation_is_reduced_by_trade_events() -> None:
@@ -78,6 +180,17 @@ def test_local_sell_reservation_is_reduced_by_trade_events() -> None:
             "size": "5",
             "price": "0.50",
             "status": "MATCHED",
+        }
+    )
+    tracker.on_trade_event(
+        {
+            "event_type": "trade",
+            "id": "buy",
+            "asset_id": "yes",
+            "side": "BUY",
+            "size": "5",
+            "price": "0.50",
+            "status": "CONFIRMED",
         }
     )
 
@@ -97,7 +210,7 @@ def test_local_sell_reservation_is_reduced_by_trade_events() -> None:
         }
     )
 
-    assert tracker.reserved("yes") == Decimal("3")
+    assert tracker.reserved("yes") == Decimal("5")
     assert tracker.sellable("yes") == Decimal("0")
 
     tracker.on_trade_event(
@@ -113,8 +226,23 @@ def test_local_sell_reservation_is_reduced_by_trade_events() -> None:
         }
     )
 
-    assert tracker.reserved("yes") == Decimal("0")
+    assert tracker.reserved("yes") == Decimal("5")
     assert tracker.owned("yes") == Decimal("0")
+
+    tracker.on_trade_event(
+        {
+            "event_type": "trade",
+            "id": "sell-fill-2",
+            "taker_order_id": "sell-1",
+            "asset_id": "yes",
+            "side": "SELL",
+            "size": "3",
+            "price": "0.56",
+            "status": "CONFIRMED",
+        }
+    )
+
+    assert tracker.reserved("yes") == Decimal("2")
 
 
 def test_tracker_returns_stale_live_order_ids_without_terminal_orders() -> None:
@@ -305,6 +433,22 @@ def test_strict_tracker_applies_trade_for_registered_current_run_order() -> None
 
     assert changed is not None
     assert tracker.owned("yes") == Decimal("5")
+    assert tracker.sellable("yes") == Decimal("0")
+
+    tracker.on_trade_event(
+        {
+            "event_type": "trade",
+            "id": "buy-fill",
+            "taker_order_id": "buy-1",
+            "asset_id": "yes",
+            "side": "BUY",
+            "size": "5",
+            "price": "0.40",
+            "status": "CONFIRMED",
+            "timestamp": "100.3",
+        }
+    )
+
     assert tracker.sellable("yes") == Decimal("5")
 
 

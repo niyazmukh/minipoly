@@ -84,7 +84,7 @@ def test_runtime_wires_exit_to_user_confirmation_before_submit() -> None:
 
     before = asyncio.run(runtime.orchestrator.evaluate_exit())
     assert before.action == "HOLD"
-    assert before.reason == "no_position"
+    assert before.reason == "no_sellable_position"
     assert submitter.calls == []
 
     submit_id = runtime.tracker.register_submit("entry", "yes", "BUY", Decimal("5"), Decimal("0.50"), now_ts=99.9)
@@ -100,6 +100,23 @@ def test_runtime_wires_exit_to_user_confirmation_before_submit() -> None:
                 "size": "5",
                 "price": "0.50",
                 "status": "MATCHED",
+            }
+        )
+    )
+
+    assert submitter.calls == []
+
+    asyncio.run(
+        runtime.orchestrator.on_user_event(
+            {
+                "event_type": "trade",
+                "id": "buy-1",
+                "taker_order_id": "buy-order-1",
+                "asset_id": "yes",
+                "side": "BUY",
+                "size": "5",
+                "price": "0.50",
+                "status": "CONFIRMED",
             }
         )
     )
@@ -128,6 +145,20 @@ def test_runtime_uses_same_tracker_for_policy_and_hot_path_sell_gate() -> None:
         )
     )
     asyncio.run(
+        runtime.orchestrator.on_user_event(
+            {
+                "event_type": "trade",
+                "id": "buy-2",
+                "taker_order_id": "buy-order-2",
+                "asset_id": "yes",
+                "side": "BUY",
+                "size": "4",
+                "price": "0.50",
+                "status": "CONFIRMED",
+            }
+        )
+    )
+    asyncio.run(
         runtime.orchestrator.on_market_event(
             {"event_type": "best_bid_ask", "asset_id": "yes", "best_bid": "0.56", "best_ask": "0.57"}
         )
@@ -149,10 +180,22 @@ def test_runtime_uses_same_tracker_for_policy_and_hot_path_sell_gate() -> None:
             "status": "MATCHED",
         }
     )
+    runtime.tracker.on_trade_event(
+        {
+            "event_type": "trade",
+            "id": "sell-1",
+            "taker_order_id": "oid-exit",
+            "asset_id": "yes",
+            "side": "SELL",
+            "size": "4",
+            "price": "0.56",
+            "status": "CONFIRMED",
+        }
+    )
     runtime.hot_path.disarm("EXIT")
 
     second = asyncio.run(runtime.orchestrator.evaluate_exit())
 
     assert second.action == "HOLD"
-    assert second.reason == "no_position"
+    assert second.reason == "no_sellable_position"
     assert len(submitter.calls) == 1

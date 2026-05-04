@@ -74,11 +74,27 @@ def test_quote_update_prepares_and_arms_template() -> None:
     assert engine.quotes == [("yes-token", Decimal("0.50"), Decimal("0.521"), 1_000_000)]
 
 
-def test_one_dollar_entry_size_rounds_up_to_venue_min_cash() -> None:
+def test_marketable_buy_budget_below_venue_floor_is_rejected() -> None:
+    engine = _Engine()
+    builder = _Builder()
+
+    try:
+        TemplateArmory(
+            cfg=ArmoryConfig(usdc_per_trade=Decimal("1.00"), min_buy_limit=Decimal("0.10")),
+            engine=engine,
+            build_template=builder,
+        )
+    except RuntimeError as exc:
+        assert "MINIMAL_USDC_PER_TRADE" in str(exc)
+    else:
+        raise AssertionError("expected RuntimeError for sub-floor live buy budget")
+
+
+def test_one_point_zero_one_dollar_entry_size_rounds_up_to_venue_min_cash() -> None:
     engine = _Engine()
     builder = _Builder()
     armory = TemplateArmory(
-        cfg=ArmoryConfig(usdc_per_trade=Decimal("1"), min_buy_limit=Decimal("0.10")),
+        cfg=ArmoryConfig(usdc_per_trade=Decimal("1.01"), min_buy_limit=Decimal("0.10")),
         engine=engine,
         build_template=builder,
     )
@@ -95,8 +111,8 @@ def test_one_dollar_entry_size_rounds_up_to_venue_min_cash() -> None:
 
     assert changed is True
     assert builder.calls[0]["price"] == Decimal("0.67")
-    assert builder.calls[0]["size"] == Decimal("1.50")
-    assert builder.calls[0]["price"] * builder.calls[0]["size"] >= Decimal("1.00")
+    assert builder.calls[0]["size"] == Decimal("1.51")
+    assert builder.calls[0]["price"] * builder.calls[0]["size"] >= Decimal("1.01")
 
 
 def test_rearm_hysteresis_skips_tiny_price_move() -> None:
@@ -143,7 +159,7 @@ def test_invalid_quote_or_size_does_not_arm() -> None:
     engine = _Engine()
     builder = _Builder()
     armory = TemplateArmory(
-        cfg=ArmoryConfig(usdc_per_trade=Decimal("1"), min_size=Decimal("5")),
+        cfg=ArmoryConfig(usdc_per_trade=Decimal("1.01"), min_size=Decimal("5")),
         engine=engine,
         build_template=builder,
     )

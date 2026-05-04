@@ -24,6 +24,7 @@ Startup is intentionally guarded:
 
 - `POLY_ALLOW_LIVE_ORDERS=true` is required for production live trading.
 - `MINIMAL_DRY_RUN_ORDERS=true` enables non-transactional smoke tests; the runtime can connect to live feeds and build/sign templates, but submit/cancel calls are local no-ops and never hit Polymarket order endpoints.
+- `MINIMAL_USDC_PER_TRADE` must be at least `1.01` for marketable BUY orders. The venue rejects effectively sub-dollar BUYs after amount truncation, so `1.00` is not executable live.
 - `MINIMAL_MIN_BUY_LIMIT` and `MINIMAL_DECISION_MIN_TTE_US` are required live entry boundaries. Startup fails closed if either is missing or incoherent. Use `MINIMAL_DECISION_MIN_TTE_US=45000000` for a 45-second no-entry window before market expiry.
 - `POLY_ALLOW_UNTRACKED_SELL` must stay false for autonomous runtime use.
 - Historical startup positions are intentionally ignored (current-run-only design). Only resting open orders are checked at startup — an old order could still fill. Set `MINIMAL_ALLOW_DIRTY_START=true` to skip the open-order check for manual recovery.
@@ -36,6 +37,14 @@ Startup is intentionally guarded:
 - Use callback hooks directly in one event loop where viable.
 - Keep debug output in standalone probe mode or exception/status paths only.
 - Sell decisions must use `LocalOrderTracker` sellable inventory from user-channel confirmations.
+- `LocalOrderTracker` now distinguishes:
+  - `owned`: local exposure seen once a trade reaches `MATCHED`
+  - `sellable`: confirmed liquid inventory only; BUY size is not sellable until the same trade reaches `CONFIRMED`
+  This prevents the bot from trying to sell just-matched BUY fills before venue balance is actually available.
+- Exit inventory is floored to the venue-supported `0.01` share quantum before
+  it is treated as sellable or position-bearing. Residual dust below `0.01`
+  remains in raw tracker accounting but does not trigger invalid zero-size SELL
+  attempts or block new entries as false open exposure.
 - Buy decisions must respect the one-unsold-position rule through `HotPathEngine` and `LocalOrderTracker.has_open_exposure()`.
 - Buy decisions must use the same explicit min/max entry-price and no-entry TTE boundaries in `SignalDecisionConfig`, `TemplateArmory`, and `HotPathGuard`; do not rely on permissive defaults for live trading.
 - Stale order cancellation must stay off the signal hot path; it runs as a separate periodic supervisor task.
@@ -55,7 +64,7 @@ Startup is intentionally guarded:
 - `exit_policy.py` decides take-profit, stop-loss, expiry, and time exits.
 - `exit_armory.py` prebuilds sell templates from exit decisions.
 - `hot_path_engine.py` checks quote, inventory, and one-position-cycle guards, then submits armed templates.
-- `order_tracker.py` tracks user-channel orders, fills, owned, reserved, sellable, cost basis, exposure state, stale live order ids, and currently live order ids.
+- `order_tracker.py` tracks user-channel orders, fills, `owned`, `settled`, reserved inventory, confirmed `sellable`, cost basis, exposure state, stale live order ids, and currently live order ids.
 - `fast_order_submitter.py` submits prebuilt signed order bodies with fresh L2 headers and batches order cancels through `DELETE /orders`.
 - `fast_order_submitter.py` signs order templates with `py_clob_client_v2` in the background but keeps the hot path as raw prebuilt body bytes plus fresh L2 headers.
 
@@ -88,11 +97,17 @@ estimator but does not affect trading thresholds.
 `signal_decision.decide_buy` uses a Brownian barrier-cross probability:
 
 ```
-P_yes = Phi((microprice - strike + alpha*OFI + beta*imbalance*sigma_px)
+P_yes = Phi((microprice - strike + gamma*move + alpha*OFI + beta*imbalance*sigma_px)
             / (sigma_scale * sigma_px * sqrt(tte_s)))
 ```
 
-`sigma_px` is the Welford stddev of microprices in the engine's window.
+`sigma_px` is the realized volatility (stddev of consecutive microprice returns
+normalized to per-second, with a floor). `move` is the microprice change over
+the engine's window — it projects the current trend forward. The signal side
+(YES/NO) is determined by momentum direction alone, not by whether microprice
+currently sits above/below strike. This allows the engine to fire when tokens
+are cheap (below 0.50) and momentum projects a crossing.
+
 The decision computes `edge = side_prob - ask` and gates on `min_edge`
 plus a hard probability floor `min_prob` (default 0.55). The path fails
 closed (`prob_unavailable`) when strike or microprice is unset, tte is
@@ -100,15 +115,16 @@ out of bounds, or the implied sigma_eff is degenerate.
 
 Set `MINIMAL_PROB_USE_LEGACY=true` to fall back to the legacy
 `fair = 0.5 + strength*scale` heuristic. Defaults are conservative and
-will trade *less* often than the legacy heuristic until alpha/beta are
-fitted.
+will trade *less* often than the legacy heuristic until alpha/beta/gamma
+are fitted.
 
 | Var | Default |
 | --- | --- |
 | `MINIMAL_PROB_ALPHA_OFI` | `0.0` |
 | `MINIMAL_PROB_BETA_IMB` | `0.0` |
+| `MINIMAL_PROB_GAMMA_MOVE` | `0.5` |
 | `MINIMAL_PROB_SIGMA_SCALE` | `1.5` |
-| `MINIMAL_PROB_SIGMA_FLOOR_USD` | `5.0` |
+| `MINIMAL_PROB_SIGMA_FLOOR_USD` | `2.0` |
 | `MINIMAL_PROB_FLOOR` | `0.02` |
 | `MINIMAL_PROB_CEIL` | `0.98` |
 | `MINIMAL_PROB_MIN_PROB` | `0.55` |

@@ -16,6 +16,7 @@ _DEC_ONE = Decimal("1")
 _CENT = Decimal("0.01")
 _MIN_CLOB_PRICE = Decimal("0.01")
 _MAX_CLOB_PRICE = Decimal("0.99")
+_MIN_MARKETABLE_BUY_USDC = Decimal("1.01")
 _LOG = logging.getLogger(__name__)
 
 
@@ -104,6 +105,10 @@ class TemplateArmory:
         build_template: BuildTemplate,
         now_ns: Callable[[], int] = time.monotonic_ns,
     ) -> None:
+        if cfg.usdc_per_trade < _MIN_MARKETABLE_BUY_USDC:
+            raise RuntimeError(
+                f"MINIMAL_USDC_PER_TRADE must be >= {_MIN_MARKETABLE_BUY_USDC} for marketable BUY orders."
+            )
         self._cfg = cfg
         self._engine = engine
         self._build_template = build_template

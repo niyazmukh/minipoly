@@ -278,7 +278,11 @@ async def build_live_bot() -> LiveBot:
     min_buy_limit, max_buy_limit, min_entry_tte_us = _entry_boundary_config()
 
     runtime = build_runtime(
-        RuntimeWiringConfig(owner=api_key, max_quote_age_ns=_int_env("MINIMAL_MAX_QUOTE_AGE_NS", 250_000_000)),
+        RuntimeWiringConfig(
+            owner=api_key,
+            max_quote_age_ns=_int_env("MINIMAL_MAX_QUOTE_AGE_NS", 250_000_000),
+            max_concurrent_positions=_int_env("MINIMAL_MAX_CONCURRENT_POSITIONS", 3),
+        ),
         state=MinimalRuntimeState(now_ns=time.monotonic_ns),
         submitter=submitter,
         build_template=_build_template,
@@ -364,15 +368,17 @@ def _entry_decision_cfg(
         max_quote_age_us=_int_env("MINIMAL_DECISION_MAX_QUOTE_AGE_US", 250_000),
         min_tte_us=min_entry_tte_us,
         min_strength=_float_env("MINIMAL_DECISION_MIN_STRENGTH", 3.0),
-        min_edge=_float_env("MINIMAL_DECISION_MIN_EDGE", 0.0),
+        min_edge=_float_env("MINIMAL_DECISION_MIN_EDGE", 0.05),
         strength_price_scale=_float_env("MINIMAL_DECISION_STRENGTH_PRICE_SCALE", 0.03),
         prob_alpha_ofi=_float_env("MINIMAL_PROB_ALPHA_OFI", 0.0),
         prob_beta_imb=_float_env("MINIMAL_PROB_BETA_IMB", 0.0),
+        prob_gamma_move=_float_env("MINIMAL_PROB_GAMMA_MOVE", 0.5),
         prob_sigma_scale=_float_env("MINIMAL_PROB_SIGMA_SCALE", 1.5),
-        prob_sigma_floor_usd=_float_env("MINIMAL_PROB_SIGMA_FLOOR_USD", 5.0),
+        prob_sigma_floor_usd=_float_env("MINIMAL_PROB_SIGMA_FLOOR_USD", 2.0),
         prob_floor=_float_env("MINIMAL_PROB_FLOOR", 0.02),
         prob_ceil=_float_env("MINIMAL_PROB_CEIL", 0.98),
         min_prob=_float_env("MINIMAL_PROB_MIN_PROB", 0.55),
+        min_edge_cheap=_float_env("MINIMAL_PROB_MIN_EDGE_CHEAP", 0.05),
         max_tte_us=_int_env("MINIMAL_PROB_MAX_TTE_US", 600_000_000),
         use_legacy_fair=_bool_env("MINIMAL_PROB_USE_LEGACY", False),
     )
@@ -472,10 +478,6 @@ def expire_unknown_submits_once(
     expired = tracker.expire_unknown_submits(now_ts=now_ts(), max_age_s=max_age_s)
     for submit_id in expired:
         tracker.release_provisional_reservation(submit_id)
-    if expired:
-        release_lock = getattr(runtime.hot_path, "release_expired_unknown_buy_lock", None)
-        if release_lock is not None:
-            release_lock()
     return len(expired)
 
 

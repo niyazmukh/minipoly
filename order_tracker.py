@@ -4,7 +4,7 @@ import dataclasses
 import os
 import re
 from dataclasses import dataclass
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation, ROUND_DOWN
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -23,6 +23,7 @@ WS_USER_URL = "wss://ws-subscriptions-clob.polymarket.com/ws/user"
 SCRIPT_ENV_FILE = Path(__file__).resolve().parent / ".env.poly"
 DEFAULT_REPLAY_LOG = Path(__file__).resolve().parent / "docs" / "userchannel.log"
 _DEC_ZERO = Decimal("0")
+_SIZE_QUANTUM = Decimal("0.01")
 
 _TERMINAL_ORDER_STATUSES = {
     "MATCHED",
@@ -75,6 +76,13 @@ def _parse_dec(raw: Any) -> Decimal:
         return Decimal(str(raw))
     except (InvalidOperation, ValueError, TypeError):
         return _DEC_ZERO
+
+
+def _floor_size_to_quantum(size: Decimal) -> Decimal:
+    size = _parse_dec(size)
+    if size <= 0:
+        return _DEC_ZERO
+    return (size / _SIZE_QUANTUM).to_integral_value(rounding=ROUND_DOWN) * _SIZE_QUANTUM
 
 
 def _parse_ts(raw: Any) -> float:
@@ -207,6 +215,7 @@ class LocalOrderTracker:
         "trades",
         "pending_submits",
         "owned_by_asset",
+        "settled_by_asset",
         "cost_by_asset",
         "reserved_sell_by_asset",
         "_reserved_by_order",
@@ -222,6 +231,7 @@ class LocalOrderTracker:
         self.trades: dict[str, TradeState] = {}
         self.pending_submits: dict[str, PendingSubmit] = {}
         self.owned_by_asset: dict[str, Decimal] = {}
+        self.settled_by_asset: dict[str, Decimal] = {}
         self.cost_by_asset: dict[str, Decimal] = {}
         self.reserved_sell_by_asset: dict[str, Decimal] = {}
         self._reserved_by_order: dict[str, tuple[str, Decimal]] = {}
@@ -297,6 +307,7 @@ class LocalOrderTracker:
         scope = frozenset(a for a in asset_ids if a)
         for asset_id in scope:
             self.owned_by_asset.pop(asset_id, None)
+            self.settled_by_asset.pop(asset_id, None)
             self.cost_by_asset.pop(asset_id, None)
             self.reserved_sell_by_asset.pop(asset_id, None)
             self._underflow_assets.discard(asset_id)
@@ -400,15 +411,27 @@ class LocalOrderTracker:
     def owned(self, asset_id: str) -> Decimal:
         return self.owned_by_asset.get(asset_id, _DEC_ZERO)
 
+    def settled(self, asset_id: str) -> Decimal:
+        return self.settled_by_asset.get(asset_id, _DEC_ZERO)
+
     def reserved(self, asset_id: str) -> Decimal:
         return self.reserved_sell_by_asset.get(asset_id, _DEC_ZERO)
 
     def sellable(self, asset_id: str) -> Decimal:
-        s = self.owned(asset_id) - self.reserved(asset_id)
-        return s if s > 0 else _DEC_ZERO
+        liquid = self.owned(asset_id)
+        settled = self.settled(asset_id)
+        if settled < liquid:
+            liquid = settled
+        s = liquid - self.reserved(asset_id)
+        if s <= 0:
+            return _DEC_ZERO
+        return _floor_size_to_quantum(s)
 
     def can_sell(self, asset_id: str, size: Decimal) -> bool:
-        return self.sellable(asset_id) >= size
+        requested = _floor_size_to_quantum(size)
+        if requested <= 0:
+            return False
+        return self.sellable(asset_id) >= requested
 
     def reserve_sell_order(self, order_id: str, asset_id: str, size: Decimal, *, now_ts: float) -> OrderState | None:
         order_id = str(order_id or "").strip()
@@ -459,9 +482,12 @@ class LocalOrderTracker:
         owned = self.owned_by_asset.get(asset_id, _DEC_ZERO)
         if owned <= 0:
             return _DEC_ZERO, _DEC_ZERO
+        tradable = _floor_size_to_quantum(owned)
+        if tradable <= 0:
+            return _DEC_ZERO, _DEC_ZERO
         cost = self.cost_by_asset.get(asset_id, _DEC_ZERO)
         entry = cost / owned if cost > 0 else _DEC_ZERO
-        return owned, entry
+        return tradable, entry
 
     def stale_live_order_ids(self, *, now_ts: float, max_age_s: float, limit: int = 50) -> list[str]:
         cutoff = float(now_ts) - max(0.0, float(max_age_s))
@@ -490,17 +516,17 @@ class LocalOrderTracker:
         for asset_id, value in self.owned_by_asset.items():
             if scope is not None and asset_id not in scope:
                 continue
-            if value > 0:
+            if _floor_size_to_quantum(value) > 0:
                 return True
         for asset_id, value in self.reserved_sell_by_asset.items():
             if scope is not None and asset_id not in scope:
                 continue
-            if value > 0:
+            if _floor_size_to_quantum(value) > 0:
                 return True
         for order in self.orders.values():
             if scope is not None and order.asset_id not in scope:
                 continue
-            if order.status not in _TERMINAL_ORDER_STATUSES and order.remaining > 0:
+            if order.status not in _TERMINAL_ORDER_STATUSES and _floor_size_to_quantum(order.remaining) > 0:
                 return True
         return False
 
@@ -617,8 +643,6 @@ class LocalOrderTracker:
 
         if status == "MATCHED" and not record.applied:
             self._apply_trade(record, reverse=False)
-            if record.side == "SELL" and record.taker_order_id:
-                self._reduce_sell_reservation(record.taker_order_id, record.size)
             record = dataclasses.replace(record, applied=True)
         elif status == "FAILED":
             if record.applied and not record.finalized:
@@ -626,6 +650,12 @@ class LocalOrderTracker:
             if not record.finalized:
                 record = dataclasses.replace(record, finalized=True)
         elif status in _TERMINAL_TRADE_STATUSES and not record.finalized:
+            if not record.applied:
+                self._apply_trade(record, reverse=False)
+                record = dataclasses.replace(record, applied=True)
+            self._apply_settled_delta(record.asset_id, self._delta_for_trade(record))
+            if record.side == "SELL" and record.taker_order_id:
+                self._reduce_sell_reservation(record.taker_order_id, record.size)
             record = dataclasses.replace(record, finalized=True)
 
         if prev is not None and self._same_trade_state(prev, record):
@@ -794,6 +824,16 @@ class LocalOrderTracker:
                 )
         self.owned_by_asset.pop(asset_id, None)
 
+    def _apply_settled_delta(self, asset_id: str, delta: Decimal) -> None:
+        if not asset_id or delta == 0:
+            return
+        current = self.settled_by_asset.get(asset_id, _DEC_ZERO)
+        updated = current + delta
+        if updated > 0:
+            self.settled_by_asset[asset_id] = updated
+        else:
+            self.settled_by_asset.pop(asset_id, None)
+
     def _update_sell_reservation(self, record: OrderState) -> None:
         prev_slot = self._reserved_by_order.get(record.order_id)
         if prev_slot is not None:
@@ -874,17 +914,21 @@ class LocalOrderTracker:
             )
 
     def dump_positions(self) -> None:
-        if not self.owned_by_asset and not self.reserved_sell_by_asset:
+        if not self.owned_by_asset and not self.settled_by_asset and not self.reserved_sell_by_asset:
             _safe_print("positions: empty")
             return
         _safe_print("positions:")
-        assets = set(self.owned_by_asset.keys()) | set(self.reserved_sell_by_asset.keys())
+        assets = set(self.owned_by_asset.keys()) | set(self.settled_by_asset.keys()) | set(self.reserved_sell_by_asset.keys())
         for asset_id in sorted(assets):
             owned = self.owned(asset_id)
+            settled = self.settled(asset_id)
             reserved = self.reserved(asset_id)
             sellable = self.sellable(asset_id)
             avg_entry = self.average_entry_price(asset_id)
-            _safe_print(f"  asset={asset_id} owned={owned} reserved={reserved} sellable={sellable} avg_entry={avg_entry}")
+            _safe_print(
+                f"  asset={asset_id} owned={owned} settled={settled} reserved={reserved} "
+                f"sellable={sellable} avg_entry={avg_entry}"
+            )
 
 
 async def _resolve_api_creds() -> tuple[str, str, str]:

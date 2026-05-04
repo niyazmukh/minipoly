@@ -296,10 +296,16 @@ class BinanceSignalEngine:
             return None
 
         move = microprice - oldest_micro
+        # Side is determined by momentum direction alone — NOT by whether
+        # microprice currently sits above/below strike. This lets the engine
+        # fire YES when BTC is moving up toward strike from below (YES tokens
+        # are cheap) and NO when BTC is moving down toward strike from above
+        # (NO tokens are cheap). The probability model in signal_decision
+        # still accounts for distance-to-strike via the drift term.
         side = ""
-        if microprice >= self._cfg.strike and move >= self._cfg.min_abs_move:
+        if move >= self._cfg.min_abs_move:
             side = "YES"
-        elif microprice <= self._cfg.strike and move <= -self._cfg.min_abs_move:
+        elif move <= -self._cfg.min_abs_move:
             side = "NO"
         else:
             return None
@@ -343,10 +349,16 @@ class BinanceSignalEngine:
         oldest_time = 0
         oldest_micro = 0.0
         ofi_sum = 0.0
-        # Welford online variance accumulator over in-window microprices.
         n = 0
-        mean = 0.0
-        m2 = 0.0
+        # Realized-volatility accumulator over consecutive in-window returns.
+        # sigma_px = sqrt(Σ dp² / total_dt_s)  — instantaneous vol in price/√s.
+        # This replaces the prior Welford stddev of microprice *levels*, which
+        # conflated trending moves with volatility and collapsed P_yes to ~0.5
+        # during directional episodes.
+        prev_ts = 0
+        prev_micro = 0.0
+        sum_sq_returns = 0.0
+        total_dt_s = 0.0
         count = self._count
         size = len(self._event_times)
         start = (self._cursor - count) % size
@@ -355,16 +367,23 @@ class BinanceSignalEngine:
             ts = self._event_times[idx]
             if ts < cutoff:
                 continue
+            micro = self._microprices[idx]
             if oldest_time == 0:
                 oldest_time = ts
-                oldest_micro = self._microprices[idx]
+                oldest_micro = micro
             ofi_sum += self._ofis[idx]
+            if n > 0:
+                dt_s = max(ts - prev_ts, 1000) / 1_000_000.0
+                dp = micro - prev_micro
+                sum_sq_returns += dp * dp
+                total_dt_s += dt_s
+            prev_ts = ts
+            prev_micro = micro
             n += 1
-            x = self._microprices[idx]
-            delta = x - mean
-            mean += delta / n
-            m2 += delta * (x - mean)
-        sigma_px = (m2 / (n - 1)) ** 0.5 if n >= 2 else 0.0
+        if n >= 2 and total_dt_s > 0.0:
+            sigma_px = (sum_sq_returns / total_dt_s) ** 0.5
+        else:
+            sigma_px = 0.0
         return oldest_time, oldest_micro, ofi_sum, sigma_px
 
 

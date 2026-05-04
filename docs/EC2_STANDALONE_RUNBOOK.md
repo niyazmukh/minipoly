@@ -65,10 +65,12 @@ sudo journalctl -u minimal-poly-bot -f
 
 - Production live trading starts only when `POLY_ALLOW_LIVE_ORDERS=true`.
 - Non-transactional smoke tests use `MINIMAL_DRY_RUN_ORDERS=true`; dry-run mode builds/signs templates and consumes live feeds, but the submitter never POSTs `/order` or DELETEs `/orders`.
+- Live marketable BUY sizing must use `MINIMAL_USDC_PER_TRADE >= 1.01`. A nominal `1.00` USDC budget can serialize below the venue's effective `$1` minimum and be rejected as a `$0.99` BUY.
 - Live startup fails closed unless `MINIMAL_MIN_BUY_LIMIT` and `MINIMAL_DECISION_MIN_TTE_US` are explicitly set and coherent. For the intended no-entry window, set `MINIMAL_DECISION_MIN_TTE_US=45000000` (45 seconds).
 - Historical startup positions are intentionally ignored. The bot only tracks positions/orders it created in the current process run.
 - Startup fails closed on existing open CLOB orders unless `MINIMAL_ALLOW_DIRTY_START=true`; an old resting order can still fill during the new process and create inventory the current-run tracker did not buy.
 - The hot path enforces one current-market buy cycle at a time: a filled buy blocks further same-market buys until the bot's own current-run position is sold and local exposure is flat.
+- SELL inventory becomes executable only after user-channel `CONFIRMED`, and sub-`0.01` residual dust is ignored for sellability/exposure so the bot does not loop on impossible zero-size exits.
 - Entry/exit order types default to `FAK`. Resting `GTC/GTD` orders require `MINIMAL_ALLOW_RESTING_ORDERS=true`.
 - Order templates are signed with `py_clob_client_v2` off the hot path. Do not replace the hot path with SDK `create_and_post_order()`; keep prebuilt body bytes plus fresh L2 headers.
 - Live startup fails closed by default unless `MINIMAL_SIGNAL_MODEL_PATH` points to a valid calibrated signal model file. The file is **parsed and applied** to `SignalDecisionConfig` and `BinanceSignalConfig`; the bot refuses to start if the schema is wrong, the file is malformed, or the file specifies no overrides. See `minimal/docs/CALIBRATION.md` for the calibration protocol the file must come out of. Set `MINIMAL_REQUIRE_CALIBRATED_MODEL=false` only for cold plumbing tests.

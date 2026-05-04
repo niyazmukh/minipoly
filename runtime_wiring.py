@@ -28,6 +28,7 @@ BuildTemplate = Callable[..., Awaitable[FastOrderTemplate]]
 class RuntimeWiringConfig:
     owner: str
     max_quote_age_ns: int = 250_000_000
+    max_concurrent_positions: int = 3
 
 
 @dataclass(frozen=True, slots=True)
@@ -69,6 +70,7 @@ def build_runtime(
         tracker=tracker,
         now_ns=now_ns,
         max_quote_age_ns=cfg.max_quote_age_ns,
+        max_concurrent_positions=cfg.max_concurrent_positions,
     )
     builder = _with_owner(build_template, cfg.owner)
     entry_armory = TemplateArmory(

@@ -186,6 +186,17 @@ def test_transport_error_sell_provisionally_reserves_inventory() -> None:
             "status": "MATCHED",
         }
     )
+    tracker.on_trade_event(
+        {
+            "event_type": "trade",
+            "id": "buy-fill",
+            "asset_id": "yes",
+            "side": "BUY",
+            "size": "5",
+            "price": "0.40",
+            "status": "CONFIRMED",
+        }
+    )
     engine = HotPathEngine(submitter=_TransportErrorSubmitter(), tracker=tracker, now_ns=lambda: 2_000)
     engine.arm("EXIT", _template(token_id="yes", side="SELL", size=5.0, price=0.50), HotPathGuard(max_ask=Decimal("1")))
     engine.update_quote("yes", bid=Decimal("0.50"), ask=Decimal("0.51"), ts_ns=2_000)
@@ -208,6 +219,17 @@ def test_transport_error_sell_releases_provisional_when_wss_confirms() -> None:
             "size": "5",
             "price": "0.40",
             "status": "MATCHED",
+        }
+    )
+    tracker.on_trade_event(
+        {
+            "event_type": "trade",
+            "id": "buy-fill",
+            "asset_id": "yes",
+            "side": "BUY",
+            "size": "5",
+            "price": "0.40",
+            "status": "CONFIRMED",
         }
     )
     engine = HotPathEngine(submitter=_TransportErrorSubmitter(), tracker=tracker, now_ns=lambda: 2_000)
@@ -254,6 +276,19 @@ def test_transport_error_sell_trade_first_recovery_releases_provisional_reservat
             "timestamp": "1.1",
         }
     )
+    tracker.on_trade_event(
+        {
+            "event_type": "trade",
+            "id": "buy-fill",
+            "taker_order_id": "buy-1",
+            "asset_id": "yes",
+            "side": "BUY",
+            "size": "5",
+            "price": "0.40",
+            "status": "CONFIRMED",
+            "timestamp": "1.2",
+        }
+    )
     engine = HotPathEngine(submitter=_TransportErrorSubmitter(), tracker=tracker, now_ns=lambda: 2_000)
     engine.arm("EXIT", _template(token_id="yes", side="SELL", size=5.0, price=0.50), HotPathGuard(max_ask=Decimal("1")))
     engine.update_quote("yes", bid=Decimal("0.50"), ask=Decimal("0.51"), ts_ns=2_000)
@@ -274,6 +309,22 @@ def test_transport_error_sell_trade_first_recovery_releases_provisional_reservat
     )
 
     assert tracker.owned("yes") == Decimal("0")
+    assert tracker.reserved("yes") == Decimal("5")
+
+    tracker.on_trade_event(
+        {
+            "event_type": "trade",
+            "id": "sell-fill",
+            "taker_order_id": "sell-recovered",
+            "asset_id": "yes",
+            "side": "SELL",
+            "size": "5",
+            "price": "0.50",
+            "status": "CONFIRMED",
+            "timestamp": "2.6",
+        }
+    )
+
     assert tracker.reserved("yes") == Decimal("0")
     pending = list(tracker.pending_submits.values())
     confirmed = [p for p in pending if p.confirmed_order_id == "sell-recovered"]
@@ -318,8 +369,8 @@ def test_unknown_buy_holds_cycle_lock() -> None:
     second = asyncio.run(engine.on_signal("NO"))
 
     assert first.reason == "submit_unknown"
-    assert second.submitted is False
-    assert second.reason == "open_exposure"
+    # Multi-position: unknown buy no longer holds cycle lock.
+    assert second.reason == "submit_unknown"
 
 
 # ---------------------------------------------------------------------------

@@ -176,9 +176,9 @@ def test_buy_template_blocks_while_unsold_position_exists() -> None:
 
     result = asyncio.run(engine.on_signal("YES"))
 
-    assert result.submitted is False
-    assert result.reason == "open_exposure"
-    assert submitter.calls == []
+    # Multi-position: buy-cycle lock removed. Second buy is allowed.
+    assert result.submitted is True
+    assert result.reason == "submitted"
 
 
 def test_buy_template_ignores_unsold_position_outside_current_scope() -> None:
@@ -218,10 +218,9 @@ def test_buy_template_stays_locked_until_position_is_sold() -> None:
     first = asyncio.run(engine.on_signal("YES"))
     second = asyncio.run(engine.on_signal("NO"))
 
+    # Multi-position: both buys allowed regardless of existing exposure.
     assert first.submitted is True
-    assert second.submitted is False
-    assert second.reason == "open_exposure"
-    assert len(submitter.calls) == 1
+    assert second.submitted is True
 
     tracker.on_trade_event(
         {
@@ -237,6 +236,17 @@ def test_buy_template_stays_locked_until_position_is_sold() -> None:
     tracker.on_trade_event(
         {
             "event_type": "trade",
+            "id": "buy-fill",
+            "asset_id": "yes",
+            "side": "BUY",
+            "size": "10",
+            "price": "0.40",
+            "status": "CONFIRMED",
+        }
+    )
+    tracker.on_trade_event(
+        {
+            "event_type": "trade",
             "id": "sell-fill",
             "asset_id": "yes",
             "side": "SELL",
@@ -246,10 +256,12 @@ def test_buy_template_stays_locked_until_position_is_sold() -> None:
         }
     )
 
+    # Re-arm NO: template was consumed by second buy. Simulates armory re-arm.
+    engine.arm("NO", _template(token_id="no", side="BUY"), HotPathGuard(max_ask=Decimal("1")))
     third = asyncio.run(engine.on_signal("NO"))
 
+    # Multi-position: re-armed template can fire again after previous position sold.
     assert third.submitted is True
-    assert len(submitter.calls) == 2
 
 
 def test_completed_old_trade_history_does_not_unlock_new_buy_cycle() -> None:
@@ -286,10 +298,9 @@ def test_completed_old_trade_history_does_not_unlock_new_buy_cycle() -> None:
     first = asyncio.run(engine.on_signal("YES"))
     second = asyncio.run(engine.on_signal("NO"))
 
+    # Multi-position: both buys allowed. Old completed trades don't block.
     assert first.submitted is True
-    assert second.submitted is False
-    assert second.reason == "open_exposure"
-    assert len(submitter.calls) == 1
+    assert second.submitted is True
 
 
 def test_in_flight_blocks_concurrent_duplicate_submit() -> None:
@@ -352,6 +363,17 @@ def test_sell_submit_reserves_inventory_until_user_channel_updates() -> None:
             "status": "MATCHED",
         }
     )
+    tracker.on_trade_event(
+        {
+            "event_type": "trade",
+            "id": "buy-fill",
+            "asset_id": "yes",
+            "side": "BUY",
+            "size": "5",
+            "price": "0.40",
+            "status": "CONFIRMED",
+        }
+    )
     engine = HotPathEngine(submitter=submitter, tracker=tracker, now_ns=lambda: 1_000_000_000)
     engine.arm("EXIT", _template(name="exit", token_id="yes", side="SELL", size=5.0), HotPathGuard(max_ask=Decimal("1")))
     engine.update_quote("yes", bid=Decimal("0.50"), ask=Decimal("0.51"), ts_ns=1_000_000_000)
@@ -384,6 +406,17 @@ def test_failed_sell_submit_does_not_reserve_inventory() -> None:
             "size": "5",
             "price": "0.40",
             "status": "MATCHED",
+        }
+    )
+    tracker.on_trade_event(
+        {
+            "event_type": "trade",
+            "id": "buy-fill",
+            "asset_id": "yes",
+            "side": "BUY",
+            "size": "5",
+            "price": "0.40",
+            "status": "CONFIRMED",
         }
     )
     engine = HotPathEngine(submitter=submitter, tracker=tracker, now_ns=lambda: 1_000)

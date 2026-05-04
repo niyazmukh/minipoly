@@ -78,6 +78,7 @@ class HotPathEngine:
         "_buy_cycle_order_id",
         "_buy_cycle_trade_count_baseline",
         "_exposure_token_ids",
+        "_max_concurrent_positions",
     )
 
     def __init__(
@@ -87,11 +88,13 @@ class HotPathEngine:
         tracker: LocalOrderTracker | None = None,
         now_ns: Callable[[], int] = time.monotonic_ns,
         max_quote_age_ns: int = 250_000_000,
+        max_concurrent_positions: int = 3,
     ) -> None:
         self._submitter = submitter
         self._tracker = tracker
         self._now_ns = now_ns
         self._max_quote_age_ns = max(1, int(max_quote_age_ns))
+        self._max_concurrent_positions = max(1, int(max_concurrent_positions))
         self._quotes: dict[str, QuoteSnapshot] = {}
         self._armed: dict[str, ArmedTemplate] = {}
         self._in_flight_buy = False
@@ -160,6 +163,15 @@ class HotPathEngine:
             return HotPathResult(False, "buy_in_flight")
         if armed.side == "SELL" and self._in_flight_sell:
             return HotPathResult(False, "sell_in_flight")
+        if armed.side == "BUY" and self._tracker is not None:
+            # Count ALL positions regardless of scope — positions from
+            # previous markets still tie up capital until confirmed sold.
+            open_count = sum(
+                1 for aid, v in self._tracker.owned_by_asset.items()
+                if v > 0
+            )
+            if open_count >= self._max_concurrent_positions:
+                return HotPathResult(False, "max_positions")
 
         template = armed.template
         quote = self._quotes.get(template.token_id)
@@ -176,8 +188,6 @@ class HotPathEngine:
             return HotPathResult(False, "ask_above_guard")
         if armed.guard.min_bid > 0 and quote.bid < armed.guard.min_bid:
             return HotPathResult(False, "bid_below_guard")
-        if armed.side == "BUY" and self._buy_blocked_by_open_exposure():
-            return HotPathResult(False, "open_exposure")
         if armed.side == "SELL":
             if self._tracker is None or not self._tracker.can_sell(template.token_id, armed.size):
                 return HotPathResult(False, "insufficient_sellable")
@@ -226,9 +236,7 @@ class HotPathEngine:
                             now_ts=self._now_ns() / _NS_PER_S,
                         )
                     self._fired.add(key)
-                    if armed.side == "BUY":
-                        self._engage_buy_cycle_lock(order_id)
-                    elif self._tracker is not None:
+                    if armed.side == "SELL" and self._tracker is not None:
                         self._tracker.reserve_sell_order(
                             order_id,
                             template.token_id,
@@ -317,14 +325,10 @@ class HotPathEngine:
     ) -> None:
         if self._tracker is not None and submit_id:
             self._tracker.mark_submit_unknown(submit_id, error=error)
-        # BUY unknown: hold the cycle lock as if accepted; the order_id
-        # is empty so lock-release path 3 (terminal-zero-fill by id) is
-        # disabled, but path 1 (exposure observed then drained) and
-        # path 2 (in-scope trade count baseline) still apply, and the
-        # pending submit will be expired by the runtime supervisor if
-        # no WSS event arrives within MINIMAL_PENDING_UNKNOWN_TIMEOUT_S.
+        # BUY unknown: no longer engages cycle lock since multi-position
+        # support removes the single-position constraint. The pending
+        # submit is tracked and expired by the runtime supervisor.
         if armed.side == "BUY":
-            self._engage_buy_cycle_lock("")
             return
         # SELL unknown: provisionally reserve inventory under the submit_id
         # so the same inventory is not double-spent by a subsequent retry.

@@ -116,6 +116,6 @@ def decide_exit(
         return _sell("time_stop", position, quote, cfg, size)
     if quote.bid >= _target(position.entry_price, cfg.take_profit_bps):
         return _sell("take_profit", position, quote, cfg, size)
-    if quote.bid <= _floor(position.entry_price, cfg.stop_loss_bps):
+    if cfg.stop_loss_bps > 0 and quote.bid <= _floor(position.entry_price, cfg.stop_loss_bps):
         return _sell("stop_loss", position, quote, cfg, size)
     return _hold("hold", position)

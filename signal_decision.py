@@ -43,17 +43,18 @@ class SignalDecisionConfig:
     max_quote_age_us: int = 250_000
     min_tte_us: int = 2_000_000
     min_strength: float = 3.0
-    min_edge: float = 0.0
+    min_edge: float = 0.05
     # Legacy heuristic fallback (used when prob model returns prob_unavailable
     # AND prob_use_legacy is true).
     strength_price_scale: float = 0.03
     # Probabilistic scaling — Brownian barrier-cross with order-flow tilts.
-    # P_yes = Phi((microprice - strike + alpha*OFI + beta*imbalance*sigma)
+    # P_yes = Phi((microprice - strike + gamma*move + alpha*OFI + beta*imbalance*sigma)
     #             / (sigma_scale * sigma_px * sqrt(tte_s)))
     prob_alpha_ofi: float = 0.0
     prob_beta_imb: float = 0.0
+    prob_gamma_move: float = 0.5
     prob_sigma_scale: float = 1.5
-    prob_sigma_floor_usd: float = 5.0
+    prob_sigma_floor_usd: float = 2.0
     prob_floor: float = 0.02
     prob_ceil: float = 0.98
     min_prob: float = 0.55
@@ -113,11 +114,17 @@ def decide_buy(
         side_prob = p_yes
     else:
         side_prob = 1.0 - p_yes
-    if side_prob < cfg.min_prob:
-        return SignalDecision("NO_BUY", "prob_below_floor", side=side, token_id=token_id, edge=side_prob - ask)
     edge = side_prob - ask
+    # Universal minimum edge: no trade fires with less than min_edge (0.05)
+    # expected profit per share. This eliminates noise trades where model
+    # and market agree (e.g. edge=0.0035 is meaningless).
     if edge < cfg.min_edge:
         return SignalDecision("NO_BUY", "edge_below_min", side=side, token_id=token_id, edge=edge)
+    # Absolute probability floor applies only to expensive tokens (ask >= 0.50).
+    # Cheap tokens (ask < 0.50) are edge-only — P can be low (0.31) but if
+    # edge is strong (0.17), the expected return justifies the trade.
+    if ask >= 0.50 and side_prob < cfg.min_prob:
+        return SignalDecision("NO_BUY", "prob_below_floor", side=side, token_id=token_id, edge=edge)
     return SignalDecision("BUY", "edge_ok", side=side, token_id=token_id, edge=edge)
 
 
@@ -146,7 +153,7 @@ def _bs_prob_yes(
     """Brownian barrier-cross probability that microprice closes >= strike at expiry.
 
     P_yes = Phi(drift_eff / sigma_eff)
-      drift_eff = (microprice - strike) + alpha * ofi + beta * imbalance * sigma_px
+      drift_eff = (microprice - strike) + gamma*move + alpha*ofi + beta*imbalance*sigma_px
       sigma_eff = sigma_scale * sigma_px * sqrt(tte_s)
 
     Returns None on missing/degenerate inputs. Caller treats None as
@@ -162,6 +169,7 @@ def _bs_prob_yes(
     move_from_strike = float(signal.microprice) - float(signal.strike)
     drift = (
         move_from_strike
+        + float(cfg.prob_gamma_move) * float(signal.move)
         + float(cfg.prob_alpha_ofi) * float(signal.ofi)
         + float(cfg.prob_beta_imb) * float(signal.imbalance) * sigma_px
     )

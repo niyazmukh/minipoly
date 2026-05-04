@@ -89,6 +89,7 @@ class MinimalBotOrchestrator:
         "_last_signal_status_ns",
         "_anchor_buffer",
         "_pending_anchor_slug_ts",
+        "_exit_balance_cooldown",
     )
 
     def __init__(
@@ -118,6 +119,7 @@ class MinimalBotOrchestrator:
         self._last_signal_status_ns = 0
         self._anchor_buffer: deque[tuple[int, float]] = deque()
         self._pending_anchor_slug_ts: int = 0
+        self._exit_balance_cooldown: dict[str, float] = {}
 
     def configure_exit_policy(
         self,
@@ -295,33 +297,65 @@ class MinimalBotOrchestrator:
             return ExitDecision("HOLD", "exit_policy_unconfigured")
         if not self.state.trading_active:
             return ExitDecision("HOLD", "market_inactive")
-        self._sync_position_from_tracker(
-            self.state.position.token_id if self.state.position is not None else ""
-        )
-        position = self.state.position
-        quote = self.state.quotes.get(position.token_id) if position is not None else None
+        if getattr(self._hot_path, "_in_flight_sell", False):
+            return ExitDecision("HOLD", "sell_in_flight")
         market = self.state.market
         tte_us = int(max(0.0, (market.end_ts - self._now_s()) if market is not None else 0.0) * 1_000_000)
-        sellable = self._tracker.sellable(position.token_id) if position is not None else Decimal("0")
-        decision = decide_exit(
-            position,
-            quote,
-            self._exit_cfg,
-            now_ns=self.state.now_ns(),
-            tte_us=tte_us,
-            sellable_size=sellable,
-        )
-        if decision.action != "SELL" or quote is None:
-            return decision
-        armed = await self._exit_armory.arm_exit(decision, quote_ts_ns=quote.ts_ns)
-        if armed:
-            result = await self._hot_path.on_signal(decision.signal)
-            _LOG.warning("exit_hot_path_result side=%s result=%r", decision.side, result)
-            if _result_attempted_submit(result):
-                retire = getattr(self._exit_armory, "retire", None)
-                if callable(retire):
-                    retire(decision.signal)
-        return decision
+        now_ns = self.state.now_ns()
+        # Iterate ALL positions — not just state.position. Each position is
+        # evaluated independently so position B doesn't wait behind position A.
+        for asset_id in list(getattr(self._tracker, "owned_by_asset", {}).keys()):
+            sellable_size = self._tracker.sellable(asset_id)
+            if sellable_size <= 0:
+                continue
+            owned, entry = self._tracker.position_size_and_entry(asset_id)
+            if owned <= 0 or entry <= 0:
+                continue
+            side = self.state.side_for_token(asset_id)
+            if not side:
+                continue
+            quote = self.state.quotes.get(asset_id)
+            if quote is None:
+                continue
+            # Skip assets that recently got "not enough balance" from the venue.
+            # Polymarket confirms trades before tokens settle in the wallet;
+            # retrying immediately just wastes API calls against a zero balance.
+            cooldown_until = self._exit_balance_cooldown.get(asset_id, 0.0)
+            if self._now_s() < cooldown_until:
+                continue
+            position = OpenPosition(
+                side=side,
+                token_id=asset_id,
+                entry_price=entry,
+                size=owned,
+                opened_ns=0,
+            )
+            decision = decide_exit(
+                position,
+                quote,
+                self._exit_cfg,
+                now_ns=now_ns,
+                tte_us=tte_us,
+                sellable_size=sellable_size,
+            )
+            if decision.action != "SELL":
+                continue
+            armed = await self._exit_armory.arm_exit(decision, quote_ts_ns=quote.ts_ns)
+            if armed:
+                result = await self._hot_path.on_signal(decision.signal)
+                _LOG.warning("exit_hot_path_result side=%s result=%r", decision.side, result)
+                # Detect venue-level "not enough balance" — Polymarket confirmed
+                # the trade but tokens haven't settled in the wallet yet.
+                # Suppress retries for 2s to let settlement complete.
+                resp = getattr(result, "response", None) or {}
+                if isinstance(resp, dict) and "not enough balance" in str(resp.get("error", "")):
+                    self._exit_balance_cooldown[asset_id] = self._now_s() + 2.0
+                if _result_attempted_submit(result):
+                    retire = getattr(self._exit_armory, "retire", None)
+                    if callable(retire):
+                        retire(decision.signal)
+                return decision
+        return ExitDecision("HOLD", "no_sellable_position")
 
     # ---- market context plumbing -----------------------------------------
 
