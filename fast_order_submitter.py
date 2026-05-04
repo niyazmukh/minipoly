@@ -24,13 +24,13 @@ except ImportError:  # pragma: no cover - exercised only when optional v2 SDK is
 ORDER_PATH = "/order"
 CANCEL_ORDERS_PATH = "/orders"
 
-# Tight per-request timeout for FAK order submission. Beats the session-wide
-# default which is friendlier to long-poll endpoints. Values target the
-# observed Polymarket /order p95 of ~850ms so a stuck socket fails fast.
+# Per-request timeout for FAK order submission. eu-west-1 → Polymarket US
+# RTT is ~300-400ms, so 2.0s gives headroom above p95 while still failing
+# fast enough for FAK orders on 5-min markets.
 _ORDER_POST_TIMEOUT = aiohttp.ClientTimeout(
-    total=1.0,
-    sock_connect=0.3,
-    sock_read=1.0,
+    total=2.0,
+    sock_connect=0.5,
+    sock_read=2.0,
 )
 
 
