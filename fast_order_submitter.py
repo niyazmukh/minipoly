@@ -66,17 +66,16 @@ def _is_v2_signed_order(signed_order: Any) -> bool:
     return hasattr(signed_order, "timestamp") and hasattr(signed_order, "builder")
 
 
-def _patch_v2_rounding_for_venue() -> None:
+def _patch_v2_rounding_for_venue(side: str | None = None) -> None:
     if V2_ROUNDING_CONFIG is None:
         return
     for round_config in V2_ROUNDING_CONFIG.values():
-        # Keep amount at SDK default (4 decimal places for tick=0.01).
-        # Reducing it to 2 corrupts the effective price for SELL orders:
-        # takerAmount = round_down(makerAmount * price, 2) produces amounts
-        # whose ratio differs from the intended price, causing the venue to
-        # reject with "breaks minimum tick size rule".  See:
-        # py_clob_client_v2.order_builder.builder.get_order_amounts()
-        #   SELL: raw_taker_amt = round_down(raw_maker_amt * raw_price, amount)
+        # Venue requires different amount precision per side:
+        #   BUY:  makerAmount (USDC) ≤ 2dp — set amount=2
+        #   SELL: takerAmount (USDC) ≤ 4dp — keep SDK default amount=4
+        #         (amount=2 over-rounds takerAmount, corrupting effective price)
+        if side == "BUY" and getattr(round_config, "amount", 0) > 2:
+            round_config.amount = 2
         if getattr(round_config, "price", 0) > 2:
             round_config.price = 2
 
@@ -203,7 +202,7 @@ async def prepare_template(
 ) -> FastOrderTemplate:
     order_args_cls = OrderArgsV2 if OrderArgsV2 is not None and _uses_v2_orders(clob) else OrderArgs
     if order_args_cls is OrderArgsV2:
-        _patch_v2_rounding_for_venue()
+        _patch_v2_rounding_for_venue(side)
     signed = await asyncio.to_thread(
         clob.create_order,
         order_args_cls(token_id=token_id, price=float(price), size=float(size), side=side),
