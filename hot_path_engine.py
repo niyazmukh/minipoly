@@ -141,9 +141,10 @@ class HotPathEngine:
             return HotPathResult(False, "quote_stale")
 
         if armed.side == "BUY" and self._tracker is not None:
-            # Count ALL positions: WSS-confirmed (owned_by_asset), pending
-            # submits (WSS lag gap), and in-memory active buys (authoritative
-            # — survives user-channel disconnection).
+            # Count ALL positions: WSS-confirmed MATCHED trades (owned_by_asset),
+            # pending submits (WSS lag gap), and in-memory accepted-submit latch
+            # (conservative anti-duplicate-entry guard during user-channel gaps;
+            # not authoritative inventory — process-local, cleared on restart).
             open_assets: set[str] = set()
             open_assets.update(aid for aid, v in self._tracker.owned_by_asset.items() if v > 0)
             open_assets.update(self._active_buy_assets)
