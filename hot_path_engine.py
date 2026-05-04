@@ -89,9 +89,11 @@ class HotPathEngine:
         self._ghost_stale_ns: int = 5_000_000_000  # 5s before ghost removal
 
     def set_exposure_scope(self, token_ids: set[str] | frozenset[str]) -> None:
-        self._armed.clear()
-        self._fired.clear()
-        self._active_buy_ts.clear()
+        # Called after every market event.  Do NOT clear _armed here — that
+        # was the root cause of "not_armed" (templates destroyed before
+        # on_signal could use them).  Market rotation already calls
+        # disarm_all() + armory.reset() separately.
+        return
 
     def disarm_all(self) -> None:
         self._armed.clear()
