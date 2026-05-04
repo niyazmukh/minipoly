@@ -133,10 +133,10 @@ class TemplateArmory:
         if not signal or not token_id or ask <= 0 or tick <= 0:
             return False
 
-        # TODO(spread-surface): compute volume-weighted executable price through
-        # ask_depth for the intended size.  SF2 (Dubach 2026) shows L1 is only
-        # ~14% of top-10 depth; when L1 is thin, the true executable price for
-        # $1 may be deeper in the book than ask + entry_slippage.
+        # TODO(spread-surface): once market_feed maintains a live L2 book and
+        # passes executable depth into the armory, compute volume-weighted
+        # executable price for the intended size.  SF2 (Dubach 2026) shows L1
+        # is only ~14% of top-10 depth.  Do not consume snapshot-only depth here.
         buy_limit = ceil_to_tick(ask + self._cfg.entry_slippage, tick)
         min_buy_limit = max(_MIN_CLOB_PRICE, self._cfg.min_buy_limit)
         max_buy_limit = min(_MAX_CLOB_PRICE, self._cfg.max_buy_limit)

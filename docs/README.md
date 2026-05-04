@@ -109,12 +109,12 @@ currently sits above/below strike. This allows the engine to fire when tokens
 are cheap (below 0.50) and momentum projects a crossing.
 
 The decision computes `edge = side_prob - ask` and gates on a **spread-aware effective minimum edge**:
-`effective_min_edge = max(cfg.min_edge, _paper_spread_floor(ask))`.  The spread floor is
-derived from Dubach (2026) SF1 Table 1 — median quoted half-spread per mid-price decile,
-converted to probability-price units.  At current `min_edge=0.05` the floor is non-binding
-for all deciles (max median half-spread is 0.0452 in `[0.30,0.40)`).  It exists as a
-defensive guard: lowering `min_edge` cannot silently drop below the venue's structural
-spread cost.
+`effective_min_edge = max(cfg.min_edge, _paper_spread_floor(ask), ask - bid)`.
+The paper spread floor is a historical safety guard from Dubach (2026) SF1 Table 1;
+the live bid-ask spread is the primary execution-cost signal. At current `min_edge=0.05`
+both floors are non-binding for all deciles (max median half-spread is 0.0452 in
+`[0.30,0.40)`).  The combined floor exists so that lowering `min_edge` cannot silently
+drop below the venue's empirically observed spread cost.
 
 A hard probability floor `min_prob` (default 0.55) gates only expensive tokens (`ask >= 0.50`).
 Cheap tokens (ask < 0.50) are edge-only — a low-P token can still be positive EV if the

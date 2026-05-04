@@ -76,6 +76,7 @@ def decide_buy(
     contract: MarketSignalContract,
     cfg: SignalDecisionConfig,
     *,
+    bid: float = 0.0,
     ask: float,
     quote_age_us: int,
     tte_us: int,
@@ -102,7 +103,7 @@ def decide_buy(
     if cfg.use_legacy_fair:
         fair = _strength_to_fair(signal.strength, cfg.strength_price_scale)
         edge = fair - ask
-        min_edge = _effective_min_edge(cfg, ask=ask)
+        min_edge = _effective_min_edge(cfg, ask=ask, bid=bid)
         if edge < min_edge:
             return SignalDecision("NO_BUY", "edge_below_min", side=side, token_id=token_id, edge=edge)
         return SignalDecision("BUY", "edge_ok_legacy", side=side, token_id=token_id, edge=edge)
@@ -116,7 +117,7 @@ def decide_buy(
     else:
         side_prob = 1.0 - p_yes
     edge = side_prob - ask
-    min_edge = _effective_min_edge(cfg, ask=ask)
+    min_edge = _effective_min_edge(cfg, ask=ask, bid=bid)
     if edge < min_edge:
         return SignalDecision("NO_BUY", "edge_below_min", side=side, token_id=token_id, edge=edge)
     # Absolute probability floor applies only to expensive tokens (ask >= 0.50).
@@ -146,11 +147,12 @@ def _phi(z: float) -> float:
     return 0.5 * (1.0 + math.erf(z / math.sqrt(2.0)))
 
 
-# Median half-spread per mid-price decile, derived from Dubach (2026) SF1
-# Table 1.  Converted from median quoted bps to probability-price units:
-#   half_spread = mid * bps / 10000 / 2
-# These are structural properties of Polymarket's CLOB V1 order book
-# (2026-02-28 to 2026-03-27, 600 markets), not strategy parameters.
+# Historical safety floor per mid-price decile, derived from Dubach (2026)
+# SF1 Table 1 median quoted bps (2026-02-28 to 2026-03-27, 600 markets).
+# Converted to probability-price units: half_spread = mid * bps / 10000 / 2.
+# These are empirically measured historical medians, not live venue truth.
+# Prefer the live ask-bid spread in _effective_min_edge when available;
+# this table is a fallback guard against misconfiguration.
 _SPREAD_FLOOR_DECILES: list[float] = [
     0.0045,  # [0.00, 0.10)
     0.0100,  # [0.10, 0.20)
@@ -166,12 +168,13 @@ _SPREAD_FLOOR_DECILES: list[float] = [
 
 
 def _paper_spread_floor(ask: float) -> float:
-    """Median half-spread cost for the price decile containing *ask*.
+    """Historical median half-spread cost for the price decile containing *ask*.
 
     At current min_edge=0.05 this floor is non-binding for all deciles
     (max median half-spread is 0.0452 in [0.30,0.40)).  The floor exists
     so that lowering min_edge cannot silently drop below the venue's
-    structural spread cost.
+    empirically observed spread cost.  Prefer the live ask-bid spread
+    in _effective_min_edge when bid data is available.
     """
     if ask <= 0.0:
         return 0.0
@@ -179,8 +182,9 @@ def _paper_spread_floor(ask: float) -> float:
     return _SPREAD_FLOOR_DECILES[idx]
 
 
-def _effective_min_edge(cfg: SignalDecisionConfig, *, ask: float) -> float:
-    return max(float(cfg.min_edge), _paper_spread_floor(ask))
+def _effective_min_edge(cfg: SignalDecisionConfig, *, ask: float, bid: float = 0.0) -> float:
+    live_spread = max(0.0, ask - bid) if bid > 0.0 else 0.0
+    return max(float(cfg.min_edge), _paper_spread_floor(ask), live_spread)
 
 
 def _bs_prob_yes(

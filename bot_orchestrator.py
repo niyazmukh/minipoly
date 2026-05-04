@@ -233,6 +233,7 @@ class MinimalBotOrchestrator:
             signal,
             self.state.contract,
             self._decision_cfg,
+            bid=float(quote.bid),
             ask=ask_float,
             quote_age_us=quote_age_us,
             tte_us=tte_us,
