@@ -1,0 +1,12 @@
+docs/
+tests/
+venv/
+state/
+.ssh_tmp/
+__pycache__/
+.pytest_cache/
+.claude/
+graphify-out/
+.git/
+*.log
+*.pem
