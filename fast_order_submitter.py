@@ -56,6 +56,7 @@ def build_order_body(
             "owner": owner,
             "orderType": order_type,
             "postOnly": bool(post_only),
+            "deferExec": False,
         }
     )
 
@@ -70,6 +71,12 @@ def _patch_v2_rounding_for_venue() -> None:
     for round_config in V2_ROUNDING_CONFIG.values():
         if getattr(round_config, "amount", 0) > 2:
             round_config.amount = 2
+        # GTC orders require price to be tick-aligned. The SDK internally
+        # computes takerAmount/makerAmount from price and size, and any
+        # floating-point drift in the price produces unrounded amounts that
+        # the venue rejects with "breaks minimum tick size rule".
+        if getattr(round_config, "price", 0) > 2:
+            round_config.price = 2
 
 
 def extract_order_id(obj: Any) -> str:

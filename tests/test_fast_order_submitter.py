@@ -52,7 +52,7 @@ def test_build_order_body_is_stable_and_compact() -> None:
         post_only=False,
     )
 
-    assert body == b'{"order":{"tokenId":"token","side":"BUY","salt":7},"owner":"api-key","orderType":"FAK","postOnly":false}'
+    assert body == b'{"order":{"tokenId":"token","side":"BUY","salt":7},"owner":"api-key","orderType":"FAK","postOnly":false,"deferExec":false}'
 
 
 def test_build_order_body_serializes_v2_signed_order_for_buy_and_sell() -> None:
