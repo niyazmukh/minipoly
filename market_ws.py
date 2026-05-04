@@ -79,6 +79,7 @@ def _event_type(ev: dict[str, Any]) -> str:
     return str(ev.get("event_type") or ev.get("eventType") or "")
 
 
+# UNCALLED: never wired up.  Kept for reference.
 def _extract_event_asset_ids_into(ev: dict[str, Any], target: set[str]) -> None:
     aid = ev.get("asset_id") or ev.get("assetId")
     if aid is not None:

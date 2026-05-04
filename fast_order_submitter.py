@@ -34,6 +34,7 @@ _ORDER_POST_TIMEOUT = aiohttp.ClientTimeout(
 )
 
 
+# DUPLICATED: also in order_placer.py:56.  Consolidate if either file is refactored.
 def _decode_secret(secret: str) -> bytes:
     pad = "=" * (-len(secret) % 4)
     return base64.urlsafe_b64decode(secret + pad)

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import logging
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any, Awaitable, Callable, Protocol
@@ -10,13 +9,14 @@ from exit_policy import ExitDecision
 from fast_order_submitter import FastOrderTemplate
 from hot_path_engine import HotPathGuard
 
-_LOG = logging.getLogger(__name__)
-
 
 class _Engine(Protocol):
     def arm(self, signal: str, template: FastOrderTemplate, guard: HotPathGuard) -> None:
         ...
 
+    # NOTE: template_armory._Engine.update_quote uses Decimal for bid/ask
+    # and Optional ts_ns.  This Protocol uses Any — type-checking gap.
+    # Both describe HotPathEngine.update_quote.
     def update_quote(self, token_id: str, *, bid: Any, ask: Any, ts_ns: int) -> None:
         ...
 
@@ -116,17 +116,11 @@ class ExitArmory:
             while self._pending is not None:
                 decision, quote_ts_ns = self._pending
                 self._pending = None
-                raw = float(decision.limit_price)
-                rounded = round(raw, 2)
-                _LOG.warning(
-                    "exit_sign limit_price=%s raw_float=%.10f rounded=%.10f reason=%s",
-                    decision.limit_price, raw, rounded, decision.reason,
-                )
                 template = await self._build_template(
                     name=f"exit-{decision.reason}",
                     token_id=decision.token_id,
                     side="SELL",
-                    price=rounded,
+                    price=round(float(decision.limit_price), 2),
                     size=float(decision.size),
                     owner=self._owner,
                     order_type=decision.order_type,
@@ -134,10 +128,6 @@ class ExitArmory:
                 )
                 prepared = _PreparedExit(decision=decision, template=template)
                 self._prepared = prepared
-                _LOG.warning(
-                    "exit_body_dump price_raw=%.10f price_template=%.10f body=%s",
-                    rounded, template.price, template.body_bytes.decode("utf-8", errors="replace"),
-                )
                 self._arm_prepared(prepared, quote_ts_ns=quote_ts_ns, quote_decision=decision)
         except asyncio.CancelledError:
             raise

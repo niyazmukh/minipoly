@@ -324,6 +324,7 @@ class HotPathEngine:
             )
 
 
+# UNCALLED: remnant of removed buy-cycle lock.  Kept for reference.
 def _accepted_submit(response: dict[str, Any], order_id: str) -> bool:
     return _classify_submit_response(response) == "accepted" and bool(order_id)
 

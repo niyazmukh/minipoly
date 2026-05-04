@@ -53,6 +53,7 @@ def _env_bool(name: str, default: bool) -> bool:
     return raw in {"1", "true", "yes", "on"}
 
 
+# DUPLICATED: also in fast_order_submitter.py:37.  Consolidate if either file is refactored.
 def _decode_secret(secret: str) -> bytes:
     pad = "=" * (-len(secret) % 4)
     return base64.urlsafe_b64decode(secret + pad)

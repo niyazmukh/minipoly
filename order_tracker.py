@@ -531,6 +531,7 @@ class LocalOrderTracker:
                 break
         return out
 
+    # UNCALLED in production; used only by tests.  Remnant of removed buy-cycle lock.
     def has_open_exposure(self, token_ids: set[str] | frozenset[str] | None = None) -> bool:
         scope = token_ids if token_ids else None
         for asset_id, value in self.owned_by_asset.items():
@@ -550,9 +551,11 @@ class LocalOrderTracker:
                 return True
         return False
 
+    # UNCALLED: remnant of removed buy-cycle lock.  Kept for reference.
     def trade_count(self) -> int:
         return len(self.trades)
 
+    # UNCALLED: remnant of removed buy-cycle lock.  Kept for reference.
     def trade_count_in_scope(self, scope: set[str] | frozenset[str] | None) -> int:
         if not scope:
             return len(self.trades)
