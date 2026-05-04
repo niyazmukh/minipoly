@@ -30,6 +30,7 @@ ANCHOR_BUFFER_HORIZON_US = 10_000_000
 CONTEXT_EVENT_TYPE = "minimal_market_context"
 INACTIVE_EVENT_TYPE = "minimal_market_inactive"
 
+_DEC_ZERO = Decimal("0")
 _DEC_TWO = Decimal("2")
 _LOG = logging.getLogger(__name__)
 
@@ -256,7 +257,61 @@ class MinimalBotOrchestrator:
                 retire = getattr(self._armory, "retire", None)
                 if callable(retire):
                     retire(decision.side)
+                # Create position from submit response immediately — do not
+                # wait for WSS trade event.  FAK orders are fill-or-kill;
+                # "matched" means full fill at the submitted price/size.
+                # If WSS delivers the MATCHED event later, the tracker's
+                # idempotency (trade ID + applied flag) prevents double-count.
+                self._apply_entry_fill_from_submit(decision, result)
         return decision
+
+    def _apply_entry_fill_from_submit(self, decision: SignalDecision, result: Any) -> None:
+        """Create a position from a successful BUY submit response.
+
+        Does not wait for WSS trade event — FAK "matched" means the order
+        filled immediately.  The tracker's idempotency via trade ID prevents
+        double-counting when the WSS event arrives later.
+        """
+        if self._tracker is None:
+            return
+        resp = getattr(result, "response", None) or {}
+        if isinstance(resp, dict) and not resp.get("success"):
+            return
+        order_id = str(resp.get("orderID") or resp.get("_order_id") or "")
+        if not order_id:
+            return
+        # Derive size from response or decision. The venue returns
+        # makingAmount (USDC spent) and takingAmount (shares received).
+        # For FAK BUY at $1.01: makingAmount ~= 1.01 (what we pay),
+        # takingAmount ~= shares (what we get). Price = makingAmount / takingAmount
+        # rounded to tick.  We reconstruct the price from the submit which
+        # is already tick-aligned; the size comes from takingAmount.
+        taking_str = resp.get("takingAmount", "")
+        try:
+            size = Decimal(str(taking_str)) if taking_str else _DEC_ZERO
+        except Exception:
+            size = _DEC_ZERO
+        if size <= 0:
+            return
+        # Build synthetic MATCHED trade.  The timestamp uses the current time;
+        # MATCHED status and taker_order_id bind to the real WSS event later.
+        synthetic = {
+            "event_type": "trade",
+            "id": f"submit-{order_id}",
+            "taker_order_id": order_id,
+            "asset_id": decision.token_id,
+            "side": "BUY",
+            "size": str(size),
+            "price": str(resp.get("price", "0")),
+            "status": "MATCHED",
+            "timestamp": str(int(self._now_s())),
+        }
+        changed = self._tracker.on_trade_event(synthetic)
+        if isinstance(changed, TradeState):
+            self._sync_position_from_tracker(changed.asset_id)
+            if changed.side == "BUY" and changed.applied:
+                self._prepare_exit_from_state()
+                self._schedule_exit_evaluation()
 
     def _maybe_log_signal_status(self) -> None:
         now_ns = self.state.now_ns()
