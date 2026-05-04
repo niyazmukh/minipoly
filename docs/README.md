@@ -56,8 +56,8 @@ Startup is intentionally guarded:
 - `minimal_live_bot.py` starts the coherent EC2 runtime, supervises market WS, user WS, Binance SBE, exit evaluation, stale cancellation, and shutdown cleanup.
 - `cold_latency_probe.py` measures local buy/sell hot-path placement latency with a stub submitter and no live exchange calls.
 - `bot_orchestrator.py` routes market/user/Binance/exit events.
-- `runtime_state.py` owns active market and quote state.
-- `polymarket_market_feed.py` converts market websocket packets into quote/market state updates.
+- `runtime_state.py` owns active market and quote state (including L2 bid/ask depth, preserved across top-of-book-only updates).
+- `polymarket_market_feed.py` converts market websocket packets into quote/market state updates, extracting and preserving L2 depth from book snapshots.
 - `binance_signal_engine.py` converts Binance best-bid/ask movement into directional signals.
 - `signal_decision.py` gates buy decisions.
 - `template_armory.py` prebuilds entry order templates.
@@ -108,10 +108,18 @@ the engine's window — it projects the current trend forward. The signal side
 currently sits above/below strike. This allows the engine to fire when tokens
 are cheap (below 0.50) and momentum projects a crossing.
 
-The decision computes `edge = side_prob - ask` and gates on `min_edge`
-plus a hard probability floor `min_prob` (default 0.55). The path fails
-closed (`prob_unavailable`) when strike or microprice is unset, tte is
-out of bounds, or the implied sigma_eff is degenerate.
+The decision computes `edge = side_prob - ask` and gates on a **spread-aware effective minimum edge**:
+`effective_min_edge = max(cfg.min_edge, _paper_spread_floor(ask))`.  The spread floor is
+derived from Dubach (2026) SF1 Table 1 — median quoted half-spread per mid-price decile,
+converted to probability-price units.  At current `min_edge=0.05` the floor is non-binding
+for all deciles (max median half-spread is 0.0452 in `[0.30,0.40)`).  It exists as a
+defensive guard: lowering `min_edge` cannot silently drop below the venue's structural
+spread cost.
+
+A hard probability floor `min_prob` (default 0.55) gates only expensive tokens (`ask >= 0.50`).
+Cheap tokens (ask < 0.50) are edge-only — a low-P token can still be positive EV if the
+edge is strong. The path fails closed (`prob_unavailable`) when strike or microprice is
+unset, tte is out of bounds, or the implied sigma_eff is degenerate.
 
 Set `MINIMAL_PROB_USE_LEGACY=true` to fall back to the legacy
 `fair = 0.5 + strength*scale` heuristic. Defaults are conservative and
@@ -168,4 +176,4 @@ The probe reports:
 - `docs/userchannel.log` and `docs/binanceseb.log` are replay/reference captures.
 - Historical `_tmp_*` API snapshots were removed from active docs because they were stale, large, and not runtime inputs. Use live official docs for final decisions when behavior may have changed.
 
-Use `graphify-out/GRAPH_REPORT.md` or `graphify-out/graph.json` before changing `/minimal`, then update `graphify-out/` after changes.
+Use `graphify-out/GRAPH_REPORT.md` or `graphify-out/graph.json` before changing `/minimal`, then run `/graphify . --update` after changes. Run `graphify hook install` for auto-rebuild on git commits (AST-only, free). See `.claude/CLAUDE.md` for full graphify v6 command reference.

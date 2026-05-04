@@ -102,7 +102,8 @@ def decide_buy(
     if cfg.use_legacy_fair:
         fair = _strength_to_fair(signal.strength, cfg.strength_price_scale)
         edge = fair - ask
-        if edge < cfg.min_edge:
+        min_edge = _effective_min_edge(cfg, ask=ask)
+        if edge < min_edge:
             return SignalDecision("NO_BUY", "edge_below_min", side=side, token_id=token_id, edge=edge)
         return SignalDecision("BUY", "edge_ok_legacy", side=side, token_id=token_id, edge=edge)
 
@@ -115,14 +116,14 @@ def decide_buy(
     else:
         side_prob = 1.0 - p_yes
     edge = side_prob - ask
-    # Universal minimum edge: no trade fires with less than min_edge (0.05)
-    # expected profit per share. This eliminates noise trades where model
-    # and market agree (e.g. edge=0.0035 is meaningless).
-    if edge < cfg.min_edge:
+    min_edge = _effective_min_edge(cfg, ask=ask)
+    if edge < min_edge:
         return SignalDecision("NO_BUY", "edge_below_min", side=side, token_id=token_id, edge=edge)
     # Absolute probability floor applies only to expensive tokens (ask >= 0.50).
     # Cheap tokens (ask < 0.50) are edge-only — P can be low (0.31) but if
     # edge is strong (0.17), the expected return justifies the trade.
+    # SF1 (Dubach 2026, Table 1) supports spread-aware scrutiny via
+    # _effective_min_edge above, not a universal absolute-probability floor.
     if ask >= 0.50 and side_prob < cfg.min_prob:
         return SignalDecision("NO_BUY", "prob_below_floor", side=side, token_id=token_id, edge=edge)
     return SignalDecision("BUY", "edge_ok", side=side, token_id=token_id, edge=edge)
@@ -143,6 +144,43 @@ def _strength_to_fair(strength: float, scale: float) -> float:
 def _phi(z: float) -> float:
     """Standard normal CDF using math.erf — no scipy dependency."""
     return 0.5 * (1.0 + math.erf(z / math.sqrt(2.0)))
+
+
+# Median half-spread per mid-price decile, derived from Dubach (2026) SF1
+# Table 1.  Converted from median quoted bps to probability-price units:
+#   half_spread = mid * bps / 10000 / 2
+# These are structural properties of Polymarket's CLOB V1 order book
+# (2026-02-28 to 2026-03-27, 600 markets), not strategy parameters.
+_SPREAD_FLOOR_DECILES: list[float] = [
+    0.0045,  # [0.00, 0.10)
+    0.0100,  # [0.10, 0.20)
+    0.0094,  # [0.20, 0.30)
+    0.0452,  # [0.30, 0.40)
+    0.0090,  # [0.40, 0.50)
+    0.0110,  # [0.50, 0.60)
+    0.0144,  # [0.60, 0.70)
+    0.0159,  # [0.70, 0.80)
+    0.0094,  # [0.80, 0.90)
+    0.0025,  # [0.90, 1.00]
+]
+
+
+def _paper_spread_floor(ask: float) -> float:
+    """Median half-spread cost for the price decile containing *ask*.
+
+    At current min_edge=0.05 this floor is non-binding for all deciles
+    (max median half-spread is 0.0452 in [0.30,0.40)).  The floor exists
+    so that lowering min_edge cannot silently drop below the venue's
+    structural spread cost.
+    """
+    if ask <= 0.0:
+        return 0.0
+    idx = min(int(ask * 10), 9)
+    return _SPREAD_FLOOR_DECILES[idx]
+
+
+def _effective_min_edge(cfg: SignalDecisionConfig, *, ask: float) -> float:
+    return max(float(cfg.min_edge), _paper_spread_floor(ask))
 
 
 def _bs_prob_yes(

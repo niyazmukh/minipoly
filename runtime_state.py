@@ -10,6 +10,7 @@ from signal_decision import MarketSignalContract
 
 _DEC_ZERO = Decimal("0")
 _DEFAULT_TICK = Decimal("0.01")
+DepthLevels = tuple[tuple[Decimal, Decimal], ...]  # (price, size) pairs, L1..Ln
 
 
 @dataclass(frozen=True, slots=True)
@@ -33,6 +34,8 @@ class QuoteState:
     ask: Decimal
     tick: Decimal
     ts_ns: int
+    bid_depth: DepthLevels = ()  # (price, size) pairs, L1..Ln
+    ask_depth: DepthLevels = ()  # (price, size) pairs, L1..Ln
 
 
 class MinimalRuntimeState:
@@ -80,13 +83,18 @@ class MinimalRuntimeState:
         ask: Decimal,
         tick: Decimal = _DEFAULT_TICK,
         ts_ns: int | None = None,
+        bid_depth: DepthLevels | None = None,
+        ask_depth: DepthLevels | None = None,
     ) -> QuoteState:
+        prev = self.quotes.get(token_id)
         quote = QuoteState(
             token_id=token_id,
             bid=bid if bid > 0 else _DEC_ZERO,
             ask=ask if ask > 0 else _DEC_ZERO,
             tick=tick if tick > 0 else _DEFAULT_TICK,
             ts_ns=int(ts_ns if ts_ns is not None else self._now_ns()),
+            bid_depth=prev.bid_depth if bid_depth is None and prev is not None else (bid_depth or ()),
+            ask_depth=prev.ask_depth if ask_depth is None and prev is not None else (ask_depth or ()),
         )
         self.quotes[token_id] = quote
         return quote
