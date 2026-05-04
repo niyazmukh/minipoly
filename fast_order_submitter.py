@@ -69,12 +69,13 @@ def _patch_v2_rounding_for_venue() -> None:
     if V2_ROUNDING_CONFIG is None:
         return
     for round_config in V2_ROUNDING_CONFIG.values():
-        if getattr(round_config, "amount", 0) > 2:
-            round_config.amount = 2
-        # GTC orders require price to be tick-aligned. The SDK internally
-        # computes takerAmount/makerAmount from price and size, and any
-        # floating-point drift in the price produces unrounded amounts that
-        # the venue rejects with "breaks minimum tick size rule".
+        # Keep amount at SDK default (4 decimal places for tick=0.01).
+        # Reducing it to 2 corrupts the effective price for SELL orders:
+        # takerAmount = round_down(makerAmount * price, 2) produces amounts
+        # whose ratio differs from the intended price, causing the venue to
+        # reject with "breaks minimum tick size rule".  See:
+        # py_clob_client_v2.order_builder.builder.get_order_amounts()
+        #   SELL: raw_taker_amt = round_down(raw_maker_amt * raw_price, amount)
         if getattr(round_config, "price", 0) > 2:
             round_config.price = 2
 
