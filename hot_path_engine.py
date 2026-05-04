@@ -96,6 +96,7 @@ class HotPathEngine:
     def disarm_all(self) -> None:
         self._armed.clear()
         self._fired.clear()
+        self._active_buy_assets.clear()
 
     def arm(self, signal: str, template: FastOrderTemplate, guard: HotPathGuard) -> None:
         key = signal.upper()
