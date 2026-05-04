@@ -144,6 +144,10 @@ class HotPathEngine:
             return HotPathResult(False, "quote_stale")
 
         if armed.side == "BUY" and self._tracker is not None:
+            # Count unique assets with active positions or pending entries.
+            # In a binary market (2 tokens), max_concurrent_positions
+            # effectively means "how many sides can be entered."  Default 3
+            # allows both YES and NO; set to 1 for single-side only.
             open_assets: set[str] = set()
             open_assets.update(aid for aid, v in self._tracker.owned_by_asset.items() if v > 0)
             open_assets.update(self._active_buy_assets)
@@ -154,6 +158,11 @@ class HotPathEngine:
                     continue
                 open_assets.add(pending.asset_id)
             if len(open_assets) >= self._max_concurrent_positions:
+                return HotPathResult(False, "max_positions")
+            # Additional guard: never buy the same token twice while a
+            # position exists.  Without this, the unique-asset check above
+            # never fires in a binary market (max 2 tokens < cap of 3).
+            if template.token_id in open_assets:
                 return HotPathResult(False, "max_positions")
 
         if armed.side == "BUY" and armed.guard.min_ask > 0 and quote.ask < armed.guard.min_ask:
