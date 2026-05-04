@@ -134,6 +134,10 @@ class ExitArmory:
                 )
                 prepared = _PreparedExit(decision=decision, template=template)
                 self._prepared = prepared
+                _LOG.warning(
+                    "exit_body_dump price_raw=%.10f price_template=%.10f body=%s",
+                    rounded, template.price, template.body_bytes.decode("utf-8", errors="replace"),
+                )
                 self._arm_prepared(prepared, quote_ts_ns=quote_ts_ns, quote_decision=decision)
         except asyncio.CancelledError:
             raise
