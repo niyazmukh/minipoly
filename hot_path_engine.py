@@ -61,7 +61,8 @@ class HotPathEngine:
         "_in_flight_buy",
         "_in_flight_sell",
         "_fired",
-        "_active_buy_assets",
+        "_active_buy_ts",
+        "_ghost_stale_ns",
         "_max_concurrent_positions",
     )
 
@@ -84,12 +85,13 @@ class HotPathEngine:
         self._in_flight_buy = False
         self._in_flight_sell = False
         self._fired: set[str] = set()
-        self._active_buy_assets: set[str] = set()
+        self._active_buy_ts: dict[str, int] = {}  # token_id -> added_ns
+        self._ghost_stale_ns: int = 5_000_000_000  # 5s before ghost removal
 
     def set_exposure_scope(self, token_ids: set[str] | frozenset[str]) -> None:
         self._armed.clear()
         self._fired.clear()
-        self._active_buy_assets.clear()
+        self._active_buy_ts.clear()
 
     def disarm_all(self) -> None:
         self._armed.clear()
@@ -117,6 +119,36 @@ class HotPathEngine:
             ts_ns=int(ts_ns if ts_ns is not None else self._now_ns()),
         )
 
+    def _cleanup_buy_ghosts(self, now_ns: int) -> None:
+        """Remove stale _active_buy_ts entries with no corresponding state.
+
+        A ghost is a token that was marked as actively bought (submit accepted)
+        but has no position in owned_by_asset and no pending submit — the
+        WSS event was lost or the FAK didn't actually fill.  After
+        _ghost_stale_ns, the entry is removed to prevent permanent capacity
+        lock.
+        """
+        if not self._tracker:
+            self._active_buy_ts.clear()
+            return
+        stale = []
+        for token_id, added_ns in list(self._active_buy_ts.items()):
+            if now_ns - added_ns < self._ghost_stale_ns:
+                continue
+            if self._tracker.owned(token_id) > 0:
+                # Position confirmed via WSS — no longer a ghost, but keep
+                # in _active_buy_ts as long as the position exists.
+                continue
+            has_pending = any(
+                p.intent == "entry" and p.asset_id == token_id
+                for p in self._tracker.pending_submits.values()
+            )
+            if has_pending:
+                continue
+            stale.append(token_id)
+        for token_id in stale:
+            self._active_buy_ts.pop(token_id, None)
+
     async def on_signal(self, signal: str) -> HotPathResult:
         key = signal.upper()
         start_ns = self._now_ns()
@@ -141,14 +173,10 @@ class HotPathEngine:
             return HotPathResult(False, "quote_stale")
 
         if armed.side == "BUY" and self._tracker is not None:
-            # Count ALL positions: WSS-confirmed MATCHED trades (owned_by_asset),
-            # pending submits (WSS lag gap), and in-memory accepted-submit latch
-            # (conservative anti-duplicate-entry guard during user-channel gaps;
-            # not authoritative inventory — process-local, cleared on restart).
+            self._cleanup_buy_ghosts(start_ns)
             open_assets: set[str] = set()
             open_assets.update(aid for aid, v in self._tracker.owned_by_asset.items() if v > 0)
-            open_assets.update(self._active_buy_assets)
-            # Only add pending entries for assets NOT already tracked above.
+            open_assets.update(self._active_buy_ts.keys())
             for pending in self._tracker.pending_submits.values():
                 if pending.intent != "entry":
                     continue
@@ -213,9 +241,9 @@ class HotPathEngine:
                         )
                     self._fired.add(key)
                     if armed.side == "BUY":
-                        self._active_buy_assets.add(template.token_id)
+                        self._active_buy_ts[template.token_id] = start_ns
                     elif armed.side == "SELL":
-                        self._active_buy_assets.discard(template.token_id)
+                        self._active_buy_ts.pop(template.token_id, None)
                         if self._tracker is not None:
                             self._tracker.reserve_sell_order(
                                 order_id,
@@ -265,7 +293,7 @@ class HotPathEngine:
 
             # Definitive server rejection.
             if armed.side == "BUY":
-                self._active_buy_assets.discard(template.token_id)
+                self._active_buy_ts.pop(template.token_id, None)
             if self._tracker is not None and submit_id:
                 self._tracker.mark_submit_failed(
                     submit_id,
@@ -282,11 +310,11 @@ class HotPathEngine:
         finally:
             if attempted_submit:
                 self.disarm(key)
-            # If we reach finally without having added to _active_buy_assets
+            # If we reach finally without having added to _active_buy_ts
             # (exception or unknown path), the BUY didn't create a real position
             # so it must not count against the concurrency cap.
             if armed.side == "BUY" and not attempted_submit:
-                self._active_buy_assets.discard(template.token_id)
+                self._active_buy_ts.pop(template.token_id, None)
             if armed.side == "BUY":
                 self._in_flight_buy = False
             else:

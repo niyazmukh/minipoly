@@ -437,10 +437,11 @@ class LocalOrderTracker:
         return self.reserved_sell_by_asset.get(asset_id, _DEC_ZERO)
 
     def sellable(self, asset_id: str) -> Decimal:
+        # MATCHED exposure is immediately sellable — waiting for CONFIRMED
+        # settlement can miss the exit window on 5-min markets.  The venue
+        # may reject with "not enough balance" if tokens haven't settled;
+        # the orchestrator handles this with a per-asset 2s cooldown.
         liquid = self.owned(asset_id)
-        settled = self.settled(asset_id)
-        if settled < liquid:
-            liquid = settled
         s = liquid - self.reserved(asset_id)
         if s <= 0:
             return _DEC_ZERO
