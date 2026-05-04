@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from decimal import Decimal, ROUND_DOWN
 
 from runtime_state import QuoteState
+
+_LOG = logging.getLogger(__name__)
 
 
 _DEC_ZERO = Decimal("0")
@@ -73,13 +76,18 @@ def sell_decision(
     cfg: ExitPolicyConfig,
     size: Decimal,
 ) -> ExitDecision:
+    lp = price_at_tick(quote.bid, quote.tick)
+    _LOG.warning(
+        "sell_decision reason=%s bid=%s tick=%s limit_price=%s",
+        reason, quote.bid, quote.tick, lp,
+    )
     return ExitDecision(
         "SELL",
         reason,
         side=position.side,
         token_id=position.token_id,
         size=size,
-        limit_price=price_at_tick(quote.bid, quote.tick),
+        limit_price=lp,
         bid=quote.bid,
         ask=quote.ask,
         order_type=cfg.order_type,

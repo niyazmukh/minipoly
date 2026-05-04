@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any, Awaitable, Callable, Protocol
@@ -8,6 +9,8 @@ from typing import Any, Awaitable, Callable, Protocol
 from exit_policy import ExitDecision
 from fast_order_submitter import FastOrderTemplate
 from hot_path_engine import HotPathGuard
+
+_LOG = logging.getLogger(__name__)
 
 
 class _Engine(Protocol):
@@ -113,11 +116,17 @@ class ExitArmory:
             while self._pending is not None:
                 decision, quote_ts_ns = self._pending
                 self._pending = None
+                raw = float(decision.limit_price)
+                rounded = round(raw, 2)
+                _LOG.warning(
+                    "exit_sign limit_price=%s raw_float=%.10f rounded=%.10f reason=%s",
+                    decision.limit_price, raw, rounded, decision.reason,
+                )
                 template = await self._build_template(
                     name=f"exit-{decision.reason}",
                     token_id=decision.token_id,
                     side="SELL",
-                    price=round(float(decision.limit_price), 2),
+                    price=rounded,
                     size=float(decision.size),
                     owner=self._owner,
                     order_type=decision.order_type,
