@@ -299,6 +299,8 @@ async def build_live_bot() -> LiveBot:
             post_only=_bool_env("MINIMAL_ENTRY_POST_ONLY", order_cfg.post_only),
             reprice_hysteresis_pct=_dec_env("MINIMAL_REPRICE_HYSTERESIS_PCT", "0.002"),
             max_quote_age_ns=_int_env("MINIMAL_MAX_QUOTE_AGE_NS", 250_000_000),
+            max_notional_overrun=_dec_env("MINIMAL_MAX_NOTIONAL_OVERRUN", "0.01"),
+            max_notional_overrun_bps=_int_env("MINIMAL_MAX_NOTIONAL_OVERRUN_BPS", 0),
         ),
         exit_cfg=ExitPolicyConfig(
             take_profit_bps=_int_env("MINIMAL_TAKE_PROFIT_BPS", 1200),

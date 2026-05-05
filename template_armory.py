@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR
 from typing import Awaitable, Callable, Protocol
 
-from fast_order_submitter import FastOrderTemplate, canonical_order_params
+from fast_order_submitter import FastOrderTemplate, canonical_buy_target_for_notional
 from hot_path_engine import HotPathGuard
 
 
@@ -56,6 +56,8 @@ class ArmoryConfig:
     post_only: bool = False
     reprice_hysteresis_pct: Decimal = Decimal("0.002")
     max_quote_age_ns: int = 250_000_000
+    max_notional_overrun: Decimal = Decimal("0.01")
+    max_notional_overrun_bps: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -142,17 +144,22 @@ class TemplateArmory:
         max_buy_limit = min(_MAX_CLOB_PRICE, self._cfg.max_buy_limit)
         if buy_limit < min_buy_limit or buy_limit > max_buy_limit:
             return False
-        raw_size = ceil_to_2dp(self._cfg.usdc_per_trade / buy_limit)
-        # min_size applies to the requested target size, not post-canonical.
-        if raw_size < self._cfg.min_size:
+        try:
+            target = canonical_buy_target_for_notional(
+                price=buy_limit,
+                target_usdc=self._cfg.usdc_per_trade,
+                tick=tick,
+                min_size=self._cfg.min_size,
+                min_maker_amount=_MIN_MARKETABLE_BUY_USDC,
+                max_notional_overrun=self._cfg.max_notional_overrun,
+                max_notional_overrun_bps=self._cfg.max_notional_overrun_bps,
+            )
+        except ValueError as exc:
+            _LOG.debug("template_armory_buy_target_rejected signal=%s error=%s", signal, exc)
             return False
 
-        canonical_buy_limit, canonical_size = canonical_order_params(
-            side="BUY",
-            price=buy_limit,
-            size=raw_size,
-            tick=tick,
-        )
+        canonical_buy_limit = target.price
+        canonical_size = target.size
 
         key = signal.upper()
         prev = self._armed.get(key)

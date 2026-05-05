@@ -89,6 +89,45 @@ def _assert_step_aligned(value: Decimal, step: Decimal, label: str) -> None:
         )
 
 
+def _buy_size_multiple_for_amount_precision(
+    price: Decimal,
+    *,
+    price_step: Decimal = PRICE_TICK,
+    maker_step: Decimal = MAKER_AMOUNT_STEP,
+    taker_step: Decimal = TAKER_AMOUNT_STEP,
+) -> Decimal:
+    """Smallest positive share-size multiple such that:
+    price * size is aligned to maker_step and size is aligned to taker_step.
+    """
+    price_units = int(price / price_step)
+    taker_scale = int(Decimal("1") / taker_step)
+    price_scale = int(Decimal("1") / price_step)
+    maker_scale = int(Decimal("1") / maker_step)
+
+    denominator = (price_scale * taker_scale) // maker_scale
+    required_multiple = denominator // math.gcd(price_units, denominator)
+
+    return Decimal(required_multiple) / Decimal(taker_scale)
+
+
+def _floor_buy_size_for_amount_precision(
+    price: Decimal,
+    size: Decimal,
+    *,
+    price_step: Decimal = PRICE_TICK,
+    maker_step: Decimal = MAKER_AMOUNT_STEP,
+    taker_step: Decimal = TAKER_AMOUNT_STEP,
+) -> Decimal:
+    """Largest size <= *size* such that price × size is aligned to *maker_step*."""
+    multiple = _buy_size_multiple_for_amount_precision(
+        price, price_step=price_step, maker_step=maker_step, taker_step=taker_step,
+    )
+    units = int(_floor_to_step(size, taker_step) / taker_step)
+    multiple_units = int(multiple / taker_step)
+    floored_units = (units // multiple_units) * multiple_units
+    return Decimal(floored_units) * taker_step
+
+
 def _ceil_buy_size_for_amount_precision(
     price: Decimal,
     size: Decimal,
@@ -97,28 +136,94 @@ def _ceil_buy_size_for_amount_precision(
     maker_step: Decimal = MAKER_AMOUNT_STEP,
     taker_step: Decimal = TAKER_AMOUNT_STEP,
 ) -> Decimal:
-    """Return the smallest size >= *size* such that price × size is
-    aligned to *maker_step*, assuming price is aligned to *price_step*
-    and size is aligned to *taker_step*.
-    """
-    price_units = int(price / price_step)
-    taker_scale = int(Decimal("1") / taker_step)
-    price_scale = int(Decimal("1") / price_step)
-    maker_scale = int(Decimal("1") / maker_step)
-
-    # price * size = (price_units/price_scale) * (taker_units/taker_scale)
-    # For this to be aligned to maker_step = 1/maker_scale:
-    #   price_units * taker_units * maker_scale  must be divisible by
-    #   price_scale * taker_scale
-    denominator = (price_scale * taker_scale) // maker_scale
-    required_multiple = denominator // math.gcd(price_units, denominator)
-
-    taker_units = int(size * taker_scale)
-    remainder = taker_units % required_multiple
+    """Smallest size >= *size* such that price × size is aligned to *maker_step*."""
+    multiple = _buy_size_multiple_for_amount_precision(
+        price, price_step=price_step, maker_step=maker_step, taker_step=taker_step,
+    )
+    units = int(_floor_to_step(size, taker_step) / taker_step)
+    multiple_units = int(multiple / taker_step)
+    remainder = units % multiple_units
     if remainder > 0:
-        taker_units += required_multiple - remainder
+        units += multiple_units - remainder
+    return Decimal(units) * taker_step
 
-    return Decimal(taker_units) / Decimal(taker_scale)
+
+@dataclass(frozen=True, slots=True)
+class BuyCanonicalTarget:
+    price: Decimal
+    size: Decimal
+    maker_amount: Decimal
+    raw_size: Decimal
+    policy: str
+
+
+def canonical_buy_target_for_notional(
+    *,
+    price: Decimal,
+    target_usdc: Decimal,
+    tick: Decimal,
+    min_size: Decimal,
+    min_maker_amount: Decimal,
+    max_notional_overrun: Decimal,
+    max_notional_overrun_bps: int = 0,
+) -> BuyCanonicalTarget:
+    """Choose a venue-valid BUY size that does not silently exceed target notional.
+
+    Precision canonicalization must not redefine trading risk.  This helper
+    treats *target_usdc* as the intended entry notional and rejects sizes
+    that would exceed it beyond an explicit, bounded tolerance.
+    """
+    q_price = _ceil_to_step(price, tick)
+
+    raw_size = (target_usdc / q_price).quantize(
+        Decimal("0.01"), rounding=ROUND_CEILING
+    )
+
+    if raw_size < min_size:
+        raise ValueError(
+            f"buy_raw_size_below_min_size price={q_price} raw_size={raw_size} min_size={min_size}"
+        )
+
+    floor_size = _floor_buy_size_for_amount_precision(
+        q_price, raw_size, price_step=tick,
+    )
+    ceil_size = _ceil_buy_size_for_amount_precision(
+        q_price, raw_size, price_step=tick,
+    )
+
+    floor_maker = q_price * floor_size
+    ceil_maker = q_price * ceil_size
+
+    bps_overrun = target_usdc * Decimal(max_notional_overrun_bps) / Decimal(10000)
+    max_allowed_maker = target_usdc + max(max_notional_overrun, bps_overrun)
+
+    # Prefer ceil (oversize slightly) if within bounds.
+    if ceil_maker >= min_maker_amount and ceil_maker <= max_allowed_maker and ceil_size >= min_size:
+        return BuyCanonicalTarget(
+            price=q_price,
+            size=ceil_size,
+            maker_amount=ceil_maker,
+            raw_size=raw_size,
+            policy="ceil",
+        )
+
+    # Otherwise accept floor (undersize).
+    if floor_maker >= min_maker_amount and floor_size >= min_size:
+        return BuyCanonicalTarget(
+            price=q_price,
+            size=floor_size,
+            maker_amount=floor_maker,
+            raw_size=raw_size,
+            policy="floor",
+        )
+
+    raise ValueError(
+        "no_valid_buy_size_within_notional_bounds "
+        f"price={q_price} target_usdc={target_usdc} "
+        f"raw_size={raw_size} floor_size={floor_size} floor_maker={floor_maker} "
+        f"ceil_size={ceil_size} ceil_maker={ceil_maker} "
+        f"max_allowed_maker={max_allowed_maker} min_maker_amount={min_maker_amount}"
+    )
 
 
 # DUPLICATED: also in order_placer.py:56.  Consolidate if either file is refactored.

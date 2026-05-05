@@ -17,9 +17,12 @@ from fast_order_submitter import (
     HeaderSigner,
     PRICE_TICK,
     _assert_tick_aligned,
+    _buy_size_multiple_for_amount_precision,
     _ceil_buy_size_for_amount_precision,
+    _floor_buy_size_for_amount_precision,
     _floor_to_step,
     build_order_body,
+    canonical_buy_target_for_notional,
     canonical_order_params,
     extract_order_id,
     prepare_template,
@@ -471,4 +474,101 @@ def test_canonical_buy_size_is_amount_precision_aligned() -> None:
         # Current ceil-to-valid-size policy: canonical size >= target
         assert q_size >= raw_size, (
             f"BUY canonical size={q_size} < target size={raw_size}"
+        )
+
+
+# ── BUY sizing helpers ────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "price,expected_multiple",
+    [
+        (Decimal("0.67"), Decimal("1.0000")),
+        (Decimal("0.51"), Decimal("1.0000")),
+        (Decimal("0.48"), Decimal("0.0625")),
+        (Decimal("0.50"), Decimal("0.0200")),
+    ],
+)
+def test_buy_size_multiple_for_amount_precision(price: Decimal, expected_multiple: Decimal) -> None:
+    from fast_order_submitter import _buy_size_multiple_for_amount_precision
+    result = _buy_size_multiple_for_amount_precision(price)
+    assert result == expected_multiple, (
+        f"price={price}: expected multiple={expected_multiple}, got {result}"
+    )
+
+
+@pytest.mark.parametrize(
+    "price,raw,expected_floor,expected_ceil",
+    [
+        (Decimal("0.48"), Decimal("20.84"), Decimal("20.8125"), Decimal("20.8750")),
+        (Decimal("0.51"), Decimal("19.61"), Decimal("19.0000"), Decimal("20.0000")),
+        (Decimal("0.50"), Decimal("20.00"), Decimal("20.0000"), Decimal("20.0000")),
+        (Decimal("0.67"), Decimal("1.51"), Decimal("1.0000"), Decimal("2.0000")),
+    ],
+)
+def test_buy_floor_ceil_for_amount_precision(
+    price: Decimal, raw: Decimal, expected_floor: Decimal, expected_ceil: Decimal
+) -> None:
+    from fast_order_submitter import _floor_buy_size_for_amount_precision, _ceil_buy_size_for_amount_precision
+    floor_size = _floor_buy_size_for_amount_precision(price, raw, price_step=Decimal("0.01"))
+    ceil_size = _ceil_buy_size_for_amount_precision(price, raw, price_step=Decimal("0.01"))
+    assert floor_size == expected_floor, f"price={price} raw={raw}: floor={floor_size}, expected={expected_floor}"
+    assert ceil_size == expected_ceil, f"price={price} raw={raw}: ceil={ceil_size}, expected={expected_ceil}"
+
+
+# ── Notional-aware policy helper ──────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "price,target_usdc,expected_size,expected_maker,expected_policy",
+    [
+        (Decimal("0.48"), Decimal("10"), Decimal("20.8125"), Decimal("9.99"), "floor"),
+        (Decimal("0.51"), Decimal("10"), Decimal("19.0000"), Decimal("9.69"), "floor"),
+        (Decimal("0.50"), Decimal("10"), Decimal("20.0000"), Decimal("10.00"), "ceil"),
+        (Decimal("0.51"), Decimal("1.01"), Decimal("2.0000"), Decimal("1.02"), "ceil"),
+    ],
+)
+def test_canonical_buy_target_for_notional_chooses_correct_policy(
+    price: Decimal, target_usdc: Decimal, expected_size: Decimal, expected_maker: Decimal, expected_policy: str
+) -> None:
+    from fast_order_submitter import canonical_buy_target_for_notional
+    target = canonical_buy_target_for_notional(
+        price=price,
+        target_usdc=target_usdc,
+        tick=Decimal("0.01"),
+        min_size=Decimal("0.01"),
+        min_maker_amount=Decimal("1.01"),
+        max_notional_overrun=Decimal("0.01"),
+    )
+    assert target.price == price
+    assert target.size == expected_size
+    assert target.maker_amount == expected_maker
+    assert target.policy == expected_policy
+
+
+def test_canonical_buy_target_for_notional_rejects_when_no_valid_size() -> None:
+    """price=0.67, target=$1.01: ceil=$1.34 > max, floor=$0.67 < min → reject."""
+    from fast_order_submitter import canonical_buy_target_for_notional
+    with pytest.raises(ValueError, match="no_valid_buy_size_within_notional_bounds"):
+        canonical_buy_target_for_notional(
+            price=Decimal("0.67"),
+            target_usdc=Decimal("1.01"),
+            tick=Decimal("0.01"),
+            min_size=Decimal("0.01"),
+            min_maker_amount=Decimal("1.01"),
+            max_notional_overrun=Decimal("0.01"),
+        )
+
+
+def test_canonical_buy_target_for_notional_rejects_below_min_size() -> None:
+    """raw_size < min_size must raise before any lattice math."""
+    from fast_order_submitter import canonical_buy_target_for_notional
+    with pytest.raises(ValueError, match="buy_raw_size_below_min_size"):
+        canonical_buy_target_for_notional(
+            price=Decimal("0.50"),
+            target_usdc=Decimal("0.10"),
+            tick=Decimal("0.01"),
+            min_size=Decimal("5.00"),
+            min_maker_amount=Decimal("1.01"),
+            max_notional_overrun=Decimal("0.01"),
         )
