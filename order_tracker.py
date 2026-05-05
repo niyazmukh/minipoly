@@ -217,8 +217,6 @@ class LocalOrderTracker:
         "owned_by_asset",
         "settled_by_asset",
         "cost_by_asset",
-        "reserved_sell_by_asset",
-        "_reserved_by_order",
         "_underflow_assets",
         "_current_run_only",
         "_submit_seq",
@@ -233,8 +231,6 @@ class LocalOrderTracker:
         self.owned_by_asset: dict[str, Decimal] = {}
         self.settled_by_asset: dict[str, Decimal] = {}
         self.cost_by_asset: dict[str, Decimal] = {}
-        self.reserved_sell_by_asset: dict[str, Decimal] = {}
-        self._reserved_by_order: dict[str, tuple[str, Decimal]] = {}
         self._underflow_assets: set[str] = set()
         self._current_run_only = bool(current_run_only)
         self._submit_seq = 0
@@ -287,11 +283,6 @@ class LocalOrderTracker:
         )
         self.pending_submits[pending.submit_id] = updated
         self._order_to_submit[oid] = pending.submit_id
-        # If SELL inventory was provisionally reserved under unknown:{submit_id},
-        # move the accounting key to the real order id. An order event will
-        # replace it with venue-reported remaining size; a trade-first event
-        # can immediately reduce it by taker_order_id.
-        self._move_provisional_reservation(pending.submit_id, oid)
         return updated
 
     def release_market_inventory(self, asset_ids: set[str] | frozenset[str]) -> None:
@@ -309,13 +300,7 @@ class LocalOrderTracker:
             self.owned_by_asset.pop(asset_id, None)
             self.settled_by_asset.pop(asset_id, None)
             self.cost_by_asset.pop(asset_id, None)
-            self.reserved_sell_by_asset.pop(asset_id, None)
             self._underflow_assets.discard(asset_id)
-        # Clear any per-order reservations whose asset has resolved.
-        for order_id, slot in list(self._reserved_by_order.items()):
-            slot_asset, _ = slot
-            if slot_asset in scope:
-                self._reserved_by_order.pop(order_id, None)
         # Mark non-terminal orders for resolved assets as canceled-by-resolution.
         for order_id, order in list(self.orders.items()):
             if order.asset_id not in scope:
@@ -334,13 +319,6 @@ class LocalOrderTracker:
                 self.pending_submits[submit_id] = dataclasses.replace(
                     pending, status="FAILED", last_error="market_resolved"
                 )
-
-    def release_provisional_reservation(self, submit_id: str) -> None:
-        """Release a provisional SELL reservation tied to an UNKNOWN submit.
-
-        Called when expire_unknown_submits decides the unknown was unaccepted.
-        """
-        self._release_reservation_key(f"unknown:{str(submit_id or '')}")
 
     def mark_submit_failed(self, submit_id: str, *, error: str = "") -> PendingSubmit | None:
         pending = self.pending_submits.get(str(submit_id or ""))
@@ -366,47 +344,6 @@ class LocalOrderTracker:
         updated = dataclasses.replace(pending, status="UNKNOWN", last_error=str(error or ""))
         self.pending_submits[pending.submit_id] = updated
         return updated
-
-    def record_local_matched_fill(
-        self,
-        *,
-        order_id: str,
-        asset_id: str,
-        side: str,
-        size: Decimal,
-        price: Decimal,
-        now_ts: float,
-    ) -> TradeState | None:
-        """Apply a submit response that already reports a MATCHED fill."""
-        oid = str(order_id or "").strip()
-        aid = str(asset_id or "").strip()
-        fill_side = str(side or "").upper().strip()
-        fill_size = _parse_dec(size)
-        fill_price = _parse_dec(price)
-        if not oid or not aid or fill_side not in {"BUY", "SELL"} or fill_size <= 0 or fill_price <= 0:
-            return None
-        trade_id = f"local:{oid}"
-        prev = self.trades.get(trade_id)
-        if prev is not None:
-            return prev
-        record = TradeState(
-            trade_id=trade_id,
-            taker_order_id=oid,
-            asset_id=aid,
-            side=fill_side,
-            size=fill_size,
-            price=fill_price,
-            status="MATCHED",
-            applied=False,
-            finalized=False,
-            updated_ts=float(now_ts),
-        )
-        self._apply_trade(record, reverse=False)
-        record = dataclasses.replace(record, applied=True)
-        self.trades[trade_id] = record
-        if fill_side == "SELL":
-            self._reduce_sell_reservation(oid, fill_size)
-        return record
 
     def expire_unknown_submits(self, *, now_ts: float, max_age_s: float) -> list[str]:
         """Age UNKNOWN submits out of the active-unconfirmed set.
@@ -475,62 +412,22 @@ class LocalOrderTracker:
         return self.settled_by_asset.get(asset_id, _DEC_ZERO)
 
     def reserved(self, asset_id: str) -> Decimal:
-        return self.reserved_sell_by_asset.get(asset_id, _DEC_ZERO)
+        return _DEC_ZERO
 
     def sellable(self, asset_id: str) -> Decimal:
         # MATCHED exposure is immediately sellable — waiting for CONFIRMED
-        # settlement can miss the exit window on 5-min markets.  The venue
-        # may reject with "not enough balance" if tokens haven't settled;
-        # the orchestrator handles this with a per-asset 2s cooldown.
+        # settlement can miss the exit window on 5-min markets. Venue balance
+        # rejections are allowed to fail fast while the exit loop keeps trying.
         liquid = self.owned(asset_id)
-        s = liquid - self.reserved(asset_id)
-        if s <= 0:
+        if liquid <= 0:
             return _DEC_ZERO
-        return _floor_size_to_quantum(s)
+        return _floor_size_to_quantum(liquid)
 
     def can_sell(self, asset_id: str, size: Decimal) -> bool:
         requested = _floor_size_to_quantum(size)
         if requested <= 0:
             return False
         return self.sellable(asset_id) >= requested
-
-    def reserve_sell_order(self, order_id: str, asset_id: str, size: Decimal, *, now_ts: float) -> OrderState | None:
-        order_id = str(order_id or "").strip()
-        asset_id = str(asset_id or "").strip()
-        size = _parse_dec(size)
-        if not order_id or not asset_id or size <= 0:
-            return None
-        record = OrderState(
-            order_id=order_id,
-            asset_id=asset_id,
-            side="SELL",
-            original_size=size,
-            size_matched=_DEC_ZERO,
-            remaining=size,
-            status="LOCAL_SUBMITTED",
-            updated_ts=float(now_ts),
-        )
-        self.orders[order_id] = record
-        self._update_sell_reservation(record)
-        return record
-
-    def reserve_unknown_sell_submit(
-        self,
-        submit_id: str,
-        asset_id: str,
-        size: Decimal,
-        *,
-        now_ts: float,
-    ) -> None:
-        """Reserve SELL inventory for an UNKNOWN submit without inventing an order."""
-        key = f"unknown:{str(submit_id or '').strip()}"
-        asset_id = str(asset_id or "").strip()
-        size = _parse_dec(size)
-        if key == "unknown:" or not asset_id or size <= 0:
-            return
-        self._release_reservation_key(key)
-        self._reserved_by_order[key] = (asset_id, size)
-        self.reserved_sell_by_asset[asset_id] = self.reserved_sell_by_asset.get(asset_id, _DEC_ZERO) + size
 
     def average_entry_price(self, asset_id: str) -> Decimal:
         owned = self.owned(asset_id)
@@ -550,37 +447,10 @@ class LocalOrderTracker:
         entry = cost / owned if cost > 0 else _DEC_ZERO
         return tradable, entry
 
-    def stale_live_order_ids(self, *, now_ts: float, max_age_s: float, limit: int = 50) -> list[str]:
-        cutoff = float(now_ts) - max(0.0, float(max_age_s))
-        out: list[str] = []
-        for order_id, order in self.orders.items():
-            if order.status in _TERMINAL_ORDER_STATUSES or order.remaining <= 0 or order.updated_ts <= 0:
-                continue
-            if order.updated_ts <= cutoff:
-                out.append(order_id)
-                if len(out) >= limit:
-                    break
-        return out
-
-    def live_order_ids(self, *, limit: int = 50) -> list[str]:
-        out: list[str] = []
-        for order_id, order in self.orders.items():
-            if order.status in _TERMINAL_ORDER_STATUSES or order.remaining <= 0:
-                continue
-            out.append(order_id)
-            if len(out) >= limit:
-                break
-        return out
-
     # UNCALLED in production; used only by tests.  Remnant of removed buy-cycle lock.
     def has_open_exposure(self, token_ids: set[str] | frozenset[str] | None = None) -> bool:
         scope = token_ids if token_ids else None
         for asset_id, value in self.owned_by_asset.items():
-            if scope is not None and asset_id not in scope:
-                continue
-            if _floor_size_to_quantum(value) > 0:
-                return True
-        for asset_id, value in self.reserved_sell_by_asset.items():
             if scope is not None and asset_id not in scope:
                 continue
             if _floor_size_to_quantum(value) > 0:
@@ -654,7 +524,6 @@ class LocalOrderTracker:
         if matched_submit_id:
             self.confirm_submit_order_id(matched_submit_id, order_id, now_ts=updated_ts)
         self.orders[order_id] = record
-        self._update_sell_reservation(record)
 
         if _DEBUG_USER_CHANNEL:
             sellable = self.sellable(asset_id) if asset_id else _DEC_ZERO
@@ -715,9 +584,6 @@ class LocalOrderTracker:
             finalized=(prev.finalized if prev is not None else False),
             updated_ts=updated_ts,
         )
-        if prev is None and self._matches_applied_local_trade(record):
-            record = dataclasses.replace(record, applied=True)
-
         if status == "MATCHED" and not record.applied:
             self._apply_trade(record, reverse=False)
             record = dataclasses.replace(record, applied=True)
@@ -731,8 +597,6 @@ class LocalOrderTracker:
                 self._apply_trade(record, reverse=False)
                 record = dataclasses.replace(record, applied=True)
             self._apply_settled_delta(record.asset_id, self._delta_for_trade(record))
-            if record.side == "SELL" and record.taker_order_id:
-                self._reduce_sell_reservation(record.taker_order_id, record.size)
             record = dataclasses.replace(record, finalized=True)
 
         if prev is not None and self._same_trade_state(prev, record):
@@ -748,19 +612,6 @@ class LocalOrderTracker:
                 f"asset={record.asset_id or '?'} size={record.size} price={record.price} owned={owned} sellable={sellable}"
             )
         return record
-
-    def _matches_applied_local_trade(self, record: TradeState) -> bool:
-        if not record.taker_order_id:
-            return False
-        local = self.trades.get(f"local:{record.taker_order_id}")
-        if local is None or not local.applied:
-            return False
-        return (
-            local.asset_id == record.asset_id
-            and local.side == record.side
-            and local.size == record.size
-            and local.price == record.price
-        )
 
     def _delta_for_trade(self, record: TradeState) -> Decimal:
         if record.size <= 0:
@@ -936,100 +787,20 @@ class LocalOrderTracker:
         else:
             self.settled_by_asset.pop(asset_id, None)
 
-    def _update_sell_reservation(self, record: OrderState) -> None:
-        prev_slot = self._reserved_by_order.get(record.order_id)
-        if prev_slot is not None:
-            prev_asset, prev_reserve = prev_slot
-            if prev_asset and prev_reserve > 0:
-                total = self.reserved_sell_by_asset.get(prev_asset, _DEC_ZERO) - prev_reserve
-                if total > 0:
-                    self.reserved_sell_by_asset[prev_asset] = total
-                else:
-                    self.reserved_sell_by_asset.pop(prev_asset, None)
-            self._reserved_by_order.pop(record.order_id, None)
-
-        reserve_next = _DEC_ZERO
-        if record.side == "SELL" and record.remaining > 0 and record.status not in _TERMINAL_ORDER_STATUSES:
-            reserve_next = record.remaining
-
-        if reserve_next > 0 and record.asset_id:
-            self._reserved_by_order[record.order_id] = (record.asset_id, reserve_next)
-            self.reserved_sell_by_asset[record.asset_id] = self.reserved_sell_by_asset.get(record.asset_id, _DEC_ZERO) + reserve_next
-
-    def _release_reservation_key(self, order_id: str) -> None:
-        slot = self._reserved_by_order.pop(str(order_id or ""), None)
-        self.orders.pop(str(order_id or ""), None)
-        if slot is None:
-            return
-        asset_id, reserved = slot
-        if not asset_id or reserved <= 0:
-            return
-        total = self.reserved_sell_by_asset.get(asset_id, _DEC_ZERO) - reserved
-        if total > 0:
-            self.reserved_sell_by_asset[asset_id] = total
-        else:
-            self.reserved_sell_by_asset.pop(asset_id, None)
-
-    def _move_provisional_reservation(self, submit_id: str, order_id: str) -> None:
-        provisional_key = f"unknown:{str(submit_id or '').strip()}"
-        order_id = str(order_id or "").strip()
-        if provisional_key == "unknown:" or not order_id:
-            return
-        slot = self._reserved_by_order.pop(provisional_key, None)
-        self.orders.pop(provisional_key, None)
-        if slot is None:
-            return
-        if order_id in self._reserved_by_order:
-            self._release_reservation_key(order_id)
-        self._reserved_by_order[order_id] = slot
-
-    def _reduce_sell_reservation(self, order_id: str, fill_size: Decimal) -> None:
-        if fill_size <= 0:
-            return
-        slot = self._reserved_by_order.get(order_id)
-        if slot is None:
-            return
-        asset_id, reserved = slot
-        used = fill_size if fill_size < reserved else reserved
-        updated = reserved - used
-        total = self.reserved_sell_by_asset.get(asset_id, _DEC_ZERO) - used
-        if total > 0:
-            self.reserved_sell_by_asset[asset_id] = total
-        else:
-            self.reserved_sell_by_asset.pop(asset_id, None)
-        if updated > 0:
-            self._reserved_by_order[order_id] = (asset_id, updated)
-        else:
-            self._reserved_by_order.pop(order_id, None)
-        order = self.orders.get(order_id)
-        if order is not None:
-            matched = order.size_matched + used
-            remaining = order.remaining - used
-            if remaining < 0:
-                remaining = _DEC_ZERO
-            status = order.status if remaining > 0 else "MATCHED"
-            self.orders[order_id] = dataclasses.replace(
-                order,
-                size_matched=matched,
-                remaining=remaining,
-                status=status,
-            )
-
     def dump_positions(self) -> None:
-        if not self.owned_by_asset and not self.settled_by_asset and not self.reserved_sell_by_asset:
+        if not self.owned_by_asset and not self.settled_by_asset:
             _safe_print("positions: empty")
             return
         _safe_print("positions:")
-        assets = set(self.owned_by_asset.keys()) | set(self.settled_by_asset.keys()) | set(self.reserved_sell_by_asset.keys())
+        assets = set(self.owned_by_asset.keys()) | set(self.settled_by_asset.keys())
         for asset_id in sorted(assets):
             owned = self.owned(asset_id)
             settled = self.settled(asset_id)
-            reserved = self.reserved(asset_id)
             sellable = self.sellable(asset_id)
             avg_entry = self.average_entry_price(asset_id)
             _safe_print(
-                f"  asset={asset_id} owned={owned} settled={settled} reserved={reserved} "
-                f"sellable={sellable} avg_entry={avg_entry}"
+                f"  asset={asset_id} owned={owned} settled={settled} sellable={sellable} "
+                f"avg_entry={avg_entry}"
             )
 
 

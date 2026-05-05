@@ -256,13 +256,6 @@ class HotPathEngine:
                         response,
                         order_id,
                     )
-                    if armed.side == "SELL" and self._tracker is not None and not matched_response:
-                        self._tracker.reserve_sell_order(
-                            order_id,
-                            template.token_id,
-                            armed.size,
-                            now_ts=start_ns / _NS_PER_S,
-                        )
                     end_ns = self._now_ns()
                     return HotPathResult(
                         submitted=True,
@@ -346,17 +339,8 @@ class HotPathEngine:
             self._tracker.mark_submit_unknown(submit_id, error=error)
         if armed.side == "BUY":
             return
-        # SELL unknown: provisionally reserve inventory under the submit_id
-        # so the same inventory is not double-spent by a subsequent retry.
-        # This must not create a synthetic live OrderState, otherwise cancel
-        # and exposure checks will see a fake venue order forever.
-        if self._tracker is not None and submit_id:
-            self._tracker.reserve_unknown_sell_submit(
-                submit_id,
-                template.token_id,
-                armed.size,
-                now_ts=start_ns / _NS_PER_S,
-            )
+        # FAK exits are allowed to retry aggressively. Inventory remains
+        # WSS-authoritative; venue balance checks reject redundant attempts.
 
     def _record_matched_response_fill(
         self,
@@ -365,31 +349,13 @@ class HotPathEngine:
         response: dict[str, Any],
         order_id: str,
     ) -> bool:
-        if self._tracker is None or not order_id:
+        if not order_id:
             return False
         status = str(response.get("status") or "").strip().upper()
         if status not in {"MATCHED", "FILLED"}:
             return False
-        taking = _dec(response.get("takingAmount"))
-        making = _dec(response.get("makingAmount"))
-        if armed.side == "BUY":
-            size = taking
-            price = making / taking if taking > 0 and making > 0 else _dec(template.price)
-        elif armed.side == "SELL":
-            size = making
-            price = taking / making if taking > 0 and making > 0 else _dec(template.price)
-        else:
-            return False
-        if size <= 0 or price <= 0:
-            return False
-        self._tracker.record_local_matched_fill(
-            order_id=order_id,
-            asset_id=template.token_id,
-            side=armed.side,
-            size=size,
-            price=price,
-            now_ts=self._now_ns() / _NS_PER_S,
-        )
+        # Inventory accounting is WSS-authoritative. Do not apply local
+        # submit response fills to avoid dual-source race double-counting.
         return True
 
 

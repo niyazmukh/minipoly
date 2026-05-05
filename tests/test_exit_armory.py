@@ -192,3 +192,61 @@ def test_arm_exit_awaits_inflight_prepare_and_returns_true_without_waiting_for_p
     assert armed is True, "arm_exit must return True after awaiting the in-flight prepare task"
     assert len(signed) == 1, "template must be signed exactly once"
     assert len(engine.armed) >= 1
+
+
+def test_exit_armory_prepares_fresh_template_after_retire() -> None:
+    engine = _Engine()
+    calls = []
+
+    async def _tracked_build_template(**kwargs) -> FastOrderTemplate:
+        calls.append(dict(kwargs))
+        n = len(calls)
+        return FastOrderTemplate(
+            name=kwargs["name"],
+            token_id=kwargs["token_id"],
+            side=kwargs["side"],
+            price=kwargs["price"],
+            size=kwargs["size"],
+            body_bytes=f'{{"sell":{n}}}'.encode("ascii"),
+        )
+
+    armory = ExitArmory(
+        engine=engine,
+        build_template=_tracked_build_template,
+        owner="owner",
+        max_quote_age_ns=100_000_000,
+    )
+    decision = ExitDecision(
+        "SELL",
+        "take_profit",
+        side="YES",
+        token_id="yes",
+        size=Decimal("5"),
+        limit_price=Decimal("0.55"),
+        bid=Decimal("0.55"),
+        ask=Decimal("0.56"),
+        order_type="FAK",
+    )
+
+    async def _run() -> None:
+        assert armory.prepare_exit(decision, quote_ts_ns=1_000) is True
+        await asyncio.sleep(0)
+        assert await armory.arm_exit(decision, quote_ts_ns=2_000) is True
+        armory.retire("EXIT")
+        assert armory.prepare_exit(decision, quote_ts_ns=2_001) is True
+        await asyncio.sleep(0)
+        assert await armory.arm_exit(decision, quote_ts_ns=2_002) is True
+
+    asyncio.run(_run())
+
+    assert len(calls) == 2
+    assert [call["name"] for call in calls] == [
+        "exit-take_profit",
+        "exit-take_profit",
+    ]
+    assert [armed[1].body_bytes for armed in engine.armed] == [
+        b'{"sell":1}',
+        b'{"sell":1}',
+        b'{"sell":2}',
+        b'{"sell":2}',
+    ]

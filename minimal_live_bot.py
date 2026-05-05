@@ -64,16 +64,13 @@ class LiveBot:
     basis_path: Path | None = None
 
     async def close(self) -> None:
-        try:
-            await cancel_open_orders_once(tracker=self.runtime.tracker, submitter=self.submitter, limit=512)
-        finally:
-            if self.basis_path is not None and self.runtime.basis_estimator is not None:
-                try:
-                    self.runtime.basis_estimator.save(self.basis_path)
-                except Exception:
-                    pass
-            await self.http.close()
-            await self.session.close()
+        if self.basis_path is not None and self.runtime.basis_estimator is not None:
+            try:
+                self.runtime.basis_estimator.save(self.basis_path)
+            except Exception:
+                pass
+        await self.http.close()
+        await self.session.close()
 
 
 def _dec_env(name: str, default: str) -> Decimal:
@@ -127,11 +124,9 @@ def _bool_env(name: str, default: bool) -> bool:
 
 def _order_type_env(name: str, default: str = "FAK") -> str:
     raw = os.getenv(name, "").strip().upper()
-    order_type = raw or "FAK"
-    if order_type in {"GTC", "GTD"} and not _bool_env("MINIMAL_ALLOW_RESTING_ORDERS", False):
-        raise RuntimeError(
-            f"{name}={order_type} is a resting order type. Set MINIMAL_ALLOW_RESTING_ORDERS=true intentionally."
-        )
+    order_type = raw or default or "FAK"
+    if order_type != "FAK":
+        raise RuntimeError(f"{name}={order_type} is disabled. Minimal runtime only supports FAK orders.")
     return order_type
 
 
@@ -248,15 +243,10 @@ async def build_live_bot() -> LiveBot:
     )
 
     async def _build_template(**kwargs):
-        # The autonomous runtime always passes an explicit order_type via
-        # the entry/exit armory configs, both of which are routed through
-        # _order_type_env's resting-order guard. Refusing the default-fallback
-        # path here closes the H2 hole: no caller can silently produce a
-        # GTC/GTD order without first opting into MINIMAL_ALLOW_RESTING_ORDERS.
         if "order_type" not in kwargs:
             raise RuntimeError(
                 "_build_template requires an explicit `order_type`. "
-                "This is enforced to prevent accidental resting orders."
+                "Minimal runtime only supports explicit FAK orders."
             )
         kwargs.pop("owner", None)
         return await prepare_template(
@@ -309,7 +299,8 @@ async def build_live_bot() -> LiveBot:
             force_exit_tte_us=_int_env("MINIMAL_FORCE_EXIT_TTE_US", 10_000_000),
             max_quote_age_us=_int_env("MINIMAL_EXIT_MAX_QUOTE_AGE_US", 250_000),
             min_bid=_dec_env("MINIMAL_EXIT_MIN_BID", "0.01"),
-            order_type=_order_type_env("MINIMAL_EXIT_ORDER_TYPE", "FAK"),
+            # Strict exit mode: exits are always FAK.
+            order_type="FAK",
         ),
         signal_cfg=_apply_signal_engine_overrides(_binance_signal_cfg(), calibrated_model),
         decision_cfg=_apply_decision_overrides(
@@ -412,79 +403,15 @@ async def _exit_loop(runtime: _Runtime, interval_s: float) -> None:
         await asyncio.sleep(delay)
 
 
-async def cancel_stale_orders_once(
-    *,
-    tracker,
-    submitter,
-    now_ts: Callable[[], float],
-    max_age_s: float,
-    limit: int,
-) -> int:
-    ts = now_ts()
-    order_ids = tracker.stale_live_order_ids(now_ts=ts, max_age_s=max_age_s, limit=limit)
-    if not order_ids:
-        return 0
-    response = await submitter.cancel_orders(order_ids)
-    if _cancel_accepted(response):
-        _mark_cancelled(tracker, order_ids, ts)
-    return len(order_ids)
-
-
-async def cancel_open_orders_once(*, tracker, submitter, limit: int) -> int:
-    order_ids = tracker.live_order_ids(limit=limit)
-    if not order_ids:
-        return 0
-    response = await submitter.cancel_orders(order_ids)
-    if _cancel_accepted(response):
-        _mark_cancelled(tracker, order_ids, time.time())
-    return len(order_ids)
-
-
-def _cancel_accepted(response) -> bool:
-    if isinstance(response, dict):
-        status = response.get("_http_status")
-        try:
-            if status is not None and int(status) >= 400:
-                return False
-        except (TypeError, ValueError):
-            return False
-        if response.get("success") is False:
-            return False
-    return True
-
-
-def _mark_cancelled(tracker, order_ids: list[str], ts: float) -> None:
-    on_order_event = getattr(tracker, "on_order_event", None)
-    if on_order_event is None:
-        return
-    for order_id in order_ids:
-        on_order_event({"event_type": "order", "id": order_id, "status": "CANCELED", "timestamp": ts})
-
-
-async def _cancel_loop(runtime: _Runtime, submitter: FastOrderSubmitter, interval_s: float, max_age_s: float) -> None:
-    delay = max(0.001, float(interval_s))
-    while True:
-        await cancel_stale_orders_once(
-            tracker=runtime.tracker,
-            submitter=submitter,
-            now_ts=time.time,
-            max_age_s=max_age_s,
-            limit=50,
-        )
-        await asyncio.sleep(delay)
-
-
 def expire_unknown_submits_once(
     runtime: _Runtime,
     *,
     now_ts: Callable[[], float],
     max_age_s: float,
 ) -> int:
-    """Expire stale UNKNOWN submits and release their local safeguards."""
+    """Expire stale UNKNOWN submits."""
     tracker = runtime.tracker
     expired = tracker.expire_unknown_submits(now_ts=now_ts(), max_age_s=max_age_s)
-    for submit_id in expired:
-        tracker.release_provisional_reservation(submit_id)
     return len(expired)
 
 
@@ -512,9 +439,6 @@ async def run_supervised(
     user_listener: Listener,
     binance_listener: Listener,
     exit_interval_s: float,
-    cancel_submitter: FastOrderSubmitter | None = None,
-    cancel_interval_s: float = 0.0,
-    cancel_max_age_s: float = 0.0,
     unknown_submit_interval_s: float = 0.0,
     unknown_submit_max_age_s: float = 0.0,
     basis_save_path: Path | None = None,
@@ -527,13 +451,6 @@ async def run_supervised(
         asyncio.create_task(binance_listener(orchestrator.on_binance_tick_fields), name="minimal-binance-sbe"),
         asyncio.create_task(_exit_loop(runtime, exit_interval_s), name="minimal-exit-loop"),
     ]
-    if cancel_submitter is not None and cancel_interval_s > 0 and cancel_max_age_s > 0:
-        tasks.append(
-            asyncio.create_task(
-                _cancel_loop(runtime, cancel_submitter, cancel_interval_s, cancel_max_age_s),
-                name="minimal-cancel-loop",
-            )
-        )
     if unknown_submit_interval_s > 0 and unknown_submit_max_age_s > 0:
         tasks.append(
             asyncio.create_task(
@@ -596,9 +513,6 @@ async def run_live() -> None:
             ),
             binance_listener=lambda cb: binance_sbe_listener.listen_forever(bcfg, bspec, on_tick_fields=cb),
             exit_interval_s=_float_env("MINIMAL_EXIT_INTERVAL_S", 0.05),
-            cancel_submitter=bot.submitter,
-            cancel_interval_s=_float_env("MINIMAL_CANCEL_INTERVAL_S", 0.25),
-            cancel_max_age_s=_float_env("MINIMAL_CANCEL_STALE_ORDER_S", 2.0),
             unknown_submit_interval_s=_float_env("MINIMAL_UNKNOWN_SUBMIT_INTERVAL_S", 0.05),
             unknown_submit_max_age_s=_float_env("MINIMAL_PENDING_UNKNOWN_TIMEOUT_S", 2.0),
             basis_save_path=bot.basis_path,

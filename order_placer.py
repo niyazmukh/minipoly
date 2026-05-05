@@ -59,19 +59,11 @@ def _decode_secret(secret: str) -> bytes:
     return base64.urlsafe_b64decode(secret + pad)
 
 
-_RESTING_ORDER_TYPES = frozenset({"GTC", "GTD"})
-
-
 def _resolve_order_type(env_name: str, default: str = "FAK") -> str:
     raw = os.getenv(env_name, "").strip().upper()
     order_type = raw or default
-    if order_type in _RESTING_ORDER_TYPES and not _env_bool("MINIMAL_ALLOW_RESTING_ORDERS", False):
-        raise RuntimeError(
-            f"{env_name}={order_type} is a resting order type. Set "
-            f"MINIMAL_ALLOW_RESTING_ORDERS=true intentionally before using "
-            f"GTC/GTD; the bot does not implement the heartbeat required to "
-            f"keep resting orders alive."
-        )
+    if order_type != "FAK":
+        raise RuntimeError(f"{env_name}={order_type} is disabled. Minimal order placer only supports FAK.")
     return order_type
 
 
@@ -95,9 +87,7 @@ class MinimalOrderConfig:
                 "or MINIMAL_DRY_RUN_ORDERS=true for non-transactional smoke tests."
             )
         # POLY_ORDER_TYPE was historically the entry default for the manual
-        # probe. The autonomous runtime uses MINIMAL_ENTRY_ORDER_TYPE/
-        # MINIMAL_EXIT_ORDER_TYPE explicitly. Default to FAK and refuse
-        # GTC/GTD unless MINIMAL_ALLOW_RESTING_ORDERS=true.
+        # probe. Minimal now only supports FAK.
         return MinimalOrderConfig(
             host=os.getenv("POLY_CLOB_HOST", "https://clob.polymarket.com").strip() or "https://clob.polymarket.com",
             chain_id=_env_int("POLY_CHAIN_ID", 137),

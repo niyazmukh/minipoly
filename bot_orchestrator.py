@@ -35,6 +35,10 @@ _LOG = logging.getLogger(__name__)
 
 
 def _result_attempted_submit(result: Any) -> bool:
+    if isinstance(result, dict) and bool(result.get("submitted", False)):
+        return True
+    if bool(getattr(result, "submitted", False)):
+        return True
     return int(getattr(result, "latency_ns", 0) or 0) > 0
 
 
@@ -89,7 +93,6 @@ class MinimalBotOrchestrator:
         "_last_signal_status_ns",
         "_anchor_buffer",
         "_pending_anchor_slug_ts",
-        "_exit_balance_cooldown",
         "_last_exit_diag_ns",
     )
 
@@ -120,7 +123,6 @@ class MinimalBotOrchestrator:
         self._last_signal_status_ns = 0
         self._anchor_buffer: deque[tuple[int, float]] = deque()
         self._pending_anchor_slug_ts: int = 0
-        self._exit_balance_cooldown: dict[str, float] = {}
         self._last_exit_diag_ns = 0
 
     def configure_exit_policy(
@@ -163,7 +165,7 @@ class MinimalBotOrchestrator:
             changed = self._tracker.on_trade_event(event)
             if isinstance(changed, TradeState):
                 self._sync_position_from_tracker(changed.asset_id)
-                if changed.side == "BUY" and changed.applied:
+                if changed.side == "BUY" and changed.applied and changed.status == "MATCHED":
                     self._prepare_exit_from_state()
                     # Schedule exit evaluation off the user-WS recv loop. The
                     # signing+HTTP cost of arm_exit must not block dispatch
@@ -334,12 +336,7 @@ class MinimalBotOrchestrator:
         # Iterate ALL positions — not just state.position. Each position is
         # evaluated independently so position B doesn't wait behind position A.
         owned_map = getattr(self._tracker, "owned_by_asset", {})
-        active_assets = {market.yes_token_id, market.no_token_id} if market is not None else set()
-        candidate_assets = [
-            asset_id
-            for asset_id in list(owned_map.keys())
-            if not active_assets or asset_id in active_assets
-        ]
+        candidate_assets = list(owned_map.keys())
         if not candidate_assets:
             if self._tracker.has_unconfirmed_submits(intent="entry"):
                 self._maybe_log_exit_diag("no_owned_assets_after_entry_submit")
@@ -354,19 +351,10 @@ class MinimalBotOrchestrator:
             if sellable_size <= 0:
                 self._maybe_log_exit_diag("no_sellable_inventory", asset_id=asset_id, owned=owned, sellable=sellable_size)
                 continue
-            side = self.state.side_for_token(asset_id)
-            if not side:
-                self._maybe_log_exit_diag("asset_outside_active_market", asset_id=asset_id, owned=owned, sellable=sellable_size)
-                continue
+            side = self.state.side_for_token(asset_id) or "UNKNOWN"
             quote = self.state.quotes.get(asset_id)
             if quote is None:
                 self._maybe_log_exit_diag("quote_missing", asset_id=asset_id, owned=owned, sellable=sellable_size)
-                continue
-            # Skip assets that recently got "not enough balance" from the venue.
-            # Polymarket confirms trades before tokens settle in the wallet;
-            # retrying immediately just wastes API calls against a zero balance.
-            cooldown_until = self._exit_balance_cooldown.get(asset_id, 0.0)
-            if self._now_s() < cooldown_until:
                 continue
             position = OpenPosition(
                 side=side,
@@ -395,19 +383,18 @@ class MinimalBotOrchestrator:
                 )
                 continue
             armed = await self._exit_armory.arm_exit(decision, quote_ts_ns=quote.ts_ns)
+            attempted_submit = False
             if armed:
                 result = await self._hot_path.on_signal(decision.signal)
                 _LOG.warning("exit_hot_path_result side=%s result=%r", decision.side, result)
-                # Detect venue-level "not enough balance" — Polymarket confirmed
-                # the trade but tokens haven't settled in the wallet yet.
-                # Suppress retries for 2s to let settlement complete.
-                resp = getattr(result, "response", None) or {}
-                if isinstance(resp, dict) and "not enough balance" in str(resp.get("error", "")):
-                    self._exit_balance_cooldown[asset_id] = self._now_s() + 2.0
-                if _result_attempted_submit(result):
-                    retire = getattr(self._exit_armory, "retire", None)
-                    if callable(retire):
-                        retire(decision.signal)
+                attempted_submit = _result_attempted_submit(result)
+            if attempted_submit:
+                retire = getattr(self._exit_armory, "retire", None)
+                if callable(retire):
+                    retire(decision.signal)
+                if self._tracker.sellable(asset_id) > 0:
+                    self._schedule_exit_evaluation()
+            if attempted_submit:
                 return decision
         return ExitDecision("HOLD", "no_sellable_position")
 
