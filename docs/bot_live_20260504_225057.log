@@ -1,0 +1,135 @@
+INFO:httpx:HTTP Request: POST https://clob.polymarket.com/auth/api-key "HTTP/2 400 Bad Request"
+INFO:httpx:HTTP Request: GET https://clob.polymarket.com/auth/derive-api-key "HTTP/2 200 OK"
+INFO:httpx:HTTP Request: POST https://clob.polymarket.com/auth/api-key "HTTP/2 400 Bad Request"
+INFO:httpx:HTTP Request: GET https://clob.polymarket.com/auth/derive-api-key "HTTP/2 200 OK"
+connected ws=wss://stream-sbe.binance.com/ws/btcusdt@bestBidAsk template_id=10001 schema_id=1 schema_version=0
+ERROR:bot_orchestrator:anchor_unavailable reason=no_ticks_in_window slug_ts=1777923600 window_us=[1777923600000000,1777923600300000]
+WARNING:bot_orchestrator:anchor_resolved slug_ts=1777923900 samples=14 strike=79998.0507
+INFO:bot_orchestrator:binance_signal_status accepted=1 signals=0 stale=0 stale_lag=0 spread_rejects=0 strike=79998.0507 microprice=79998.0506 ofi=0.0000 imbalance=-0.8878
+INFO:httpx:HTTP Request: GET https://clob.polymarket.com/tick-size?token_id=66500934797975932877977737549496976050687312624425236711589657807785601377500 "HTTP/2 200 OK"
+INFO:httpx:HTTP Request: GET https://clob.polymarket.com/tick-size?token_id=24343349703859790677235566466710159759921438321169028021734125747850858788044 "HTTP/2 200 OK"
+INFO:httpx:HTTP Request: GET https://clob.polymarket.com/neg-risk?token_id=24343349703859790677235566466710159759921438321169028021734125747850858788044 "HTTP/2 200 OK"
+INFO:httpx:HTTP Request: GET https://clob.polymarket.com/neg-risk?token_id=66500934797975932877977737549496976050687312624425236711589657807785601377500 "HTTP/2 200 OK"
+ERROR:py_clob_client_v2.http_helpers.helpers:[py_clob_client_v2] request error: Server disconnected
+ERROR:py_clob_client_v2.http_helpers.helpers:[py_clob_client_v2] request error: Server disconnected
+INFO:bot_orchestrator:binance_signal_decision action=NO_BUY reason=edge_below_min side=NO token_id=66500934797975932877977737549496976050687312624425236711589657807785601377500 ask=0.5100 quote_age_us=2755 tte_us=294631765 edge=0.0046
+INFO:bot_orchestrator:binance_signal_decision action=NO_BUY reason=edge_below_min side=NO token_id=66500934797975932877977737549496976050687312624425236711589657807785601377500 ask=0.5700 quote_age_us=248 tte_us=293522526 edge=-0.0132
+INFO:bot_orchestrator:binance_signal_decision action=NO_BUY reason=edge_below_min side=NO token_id=66500934797975932877977737549496976050687312624425236711589657807785601377500 ask=0.5700 quote_age_us=3689 tte_us=292523755 edge=-0.0173
+INFO:bot_orchestrator:binance_signal_decision action=NO_BUY reason=edge_below_min side=NO token_id=66500934797975932877977737549496976050687312624425236711589657807785601377500 ask=0.5900 quote_age_us=2843 tte_us=291231716 edge=-0.0059
+INFO:bot_orchestrator:binance_signal_status accepted=223 signals=4 stale=0 stale_lag=0 spread_rejects=0 strike=79998.0507 microprice=79987.9908 ofi=-0.0001 imbalance=-0.8324
+INFO:bot_orchestrator:binance_signal_decision action=NO_BUY reason=edge_below_min side=NO token_id=66500934797975932877977737549496976050687312624425236711589657807785601377500 ask=0.5900 quote_age_us=26182 tte_us=289335996 edge=-0.0007
+INFO:bot_orchestrator:binance_signal_decision action=BUY reason=edge_ok side=NO token_id=66500934797975932877977737549496976050687312624425236711589657807785601377500 ask=0.6000 quote_age_us=6661 tte_us=288331915 edge=0.0527
+INFO:bot_orchestrator:binance_signal_decision action=NO_BUY reason=edge_below_min side=NO token_id=66500934797975932877977737549496976050687312624425236711589657807785601377500 ask=0.6000 quote_age_us=32114 tte_us=287331550 edge=0.0335
+WARNING:bot_orchestrator:entry_hot_path_result side=NO result=HotPathResult(submitted=True, reason='submitted', order_id='0x2c842a89c3b335d209c2f535b237e29a0dde9608c6aafc7eebae0bb7fc425df0', latency_ns=1964554851, response={'errorMsg': '', 'orderID': '0x2c842a89c3b335d209c2f535b237e29a0dde9608c6aafc7eebae0bb7fc425df0', 'takingAmount': '1.578125', 'makingAmount': '1.01', 'status': 'matched', 'transactionsHashes': ['0xafbc507e7e4dff2b74b6b6402d2a6c6d823b3c9c480ded7e2d638f403b44e8ce'], 'success': True, '_http_status': 200, '_order_id': '0x2c842a89c3b335d209c2f535b237e29a0dde9608c6aafc7eebae0bb7fc425df0'})
+INFO:bot_orchestrator:binance_signal_decision action=NO_BUY reason=edge_below_min side=NO token_id=66500934797975932877977737549496976050687312624425236711589657807785601377500 ask=0.6600 quote_age_us=3094 tte_us=286151872 edge=-0.0251
+INFO:bot_orchestrator:binance_signal_status accepted=486 signals=8 stale=0 stale_lag=0 spread_rejects=0 strike=79998.0507 microprice=79970.0018 ofi=-0.1046 imbalance=-0.6385
+INFO:bot_orchestrator:binance_signal_status accepted=595 signals=8 stale=0 stale_lag=0 spread_rejects=0 strike=79998.0507 microprice=79970.0011 ofi=-0.0001 imbalance=-0.7797
+INFO:bot_orchestrator:binance_signal_status accepted=638 signals=8 stale=0 stale_lag=0 spread_rejects=0 strike=79998.0507 microprice=79970.0010 ofi=0.0001 imbalance=-0.8044
+INFO:bot_orchestrator:binance_signal_status accepted=811 signals=8 stale=0 stale_lag=0 spread_rejects=0 strike=79998.0507 microprice=79970.0008 ofi=-0.0001 imbalance=-0.8341
+INFO:bot_orchestrator:binance_signal_status accepted=1001 signals=8 stale=0 stale_lag=0 spread_rejects=0 strike=79998.0507 microprice=79970.0075 ofi=0.0007 imbalance=0.4933
+INFO:bot_orchestrator:binance_signal_status accepted=1072 signals=8 stale=0 stale_lag=0 spread_rejects=0 strike=79998.0507 microprice=79970.0078 ofi=0.0001 imbalance=0.5669
+INFO:bot_orchestrator:binance_signal_decision action=NO_BUY reason=edge_below_min side=YES token_id=24343349703859790677235566466710159759921438321169028021734125747850858788044 ask=0.4000 quote_age_us=10094 tte_us=257738862 edge=-0.1023
+INFO:bot_orchestrator:binance_signal_decision action=NO_BUY reason=edge_below_min side=YES token_id=24343349703859790677235566466710159759921438321169028021734125747850858788044 ask=0.4000 quote_age_us=5142 tte_us=256703716 edge=0.0412
+INFO:bot_orchestrator:binance_signal_decision action=NO_BUY reason=edge_below_min side=YES token_id=24343349703859790677235566466710159759921438321169028021734125747850858788044 ask=0.4000 quote_age_us=25251 tte_us=255681673 edge=0.0190
+INFO:bot_orchestrator:binance_signal_status accepted=1216 signals=11 stale=0 stale_lag=0 spread_rejects=0 strike=79998.0507 microprice=79979.4878 ofi=-0.0003 imbalance=0.5651
+INFO:bot_orchestrator:binance_signal_status accepted=1406 signals=11 stale=0 stale_lag=0 spread_rejects=0 strike=79998.0507 microprice=79979.4843 ofi=0.0001 imbalance=-0.1433
+INFO:bot_orchestrator:binance_signal_status accepted=1575 signals=11 stale=0 stale_lag=0 spread_rejects=0 strike=79998.0507 microprice=79979.4852 ofi=0.0007 imbalance=0.0353
+INFO:bot_orchestrator:binance_signal_status accepted=1655 signals=11 stale=0 stale_lag=0 spread_rejects=0 strike=79998.0507 microprice=79979.4849 ofi=0.0063 imbalance=-0.0161
+INFO:bot_orchestrator:binance_signal_status accepted=1753 signals=11 stale=0 stale_lag=0 spread_rejects=0 strike=79998.0507 microprice=79979.4835 ofi=0.0000 imbalance=-0.2920
+INFO:bot_orchestrator:binance_signal_status accepted=1936 signals=11 stale=0 stale_lag=0 spread_rejects=0 strike=79998.0507 microprice=79979.4878 ofi=-0.0001 imbalance=0.5562
+INFO:bot_orchestrator:binance_signal_decision action=NO_BUY reason=edge_below_min side=YES token_id=24343349703859790677235566466710159759921438321169028021734125747850858788044 ask=0.4400 quote_age_us=8584 tte_us=229522938 edge=-0.0924
+INFO:bot_orchestrator:binance_signal_decision action=NO_BUY reason=edge_below_min side=YES token_id=24343349703859790677235566466710159759921438321169028021734125747850858788044 ask=0.4700 quote_age_us=3328 tte_us=228505836 edge=0.0140
+INFO:bot_orchestrator:binance_signal_decision action=NO_BUY reason=edge_below_min side=YES token_id=24343349703859790677235566466710159759921438321169028021734125747850858788044 ask=0.5100 quote_age_us=98809 tte_us=227505816 edge=-0.0256
+INFO:bot_orchestrator:binance_signal_decision action=NO_BUY reason=edge_below_min side=YES token_id=24343349703859790677235566466710159759921438321169028021734125747850858788044 ask=0.5400 quote_age_us=963 tte_us=226409856 edge=-0.0684
+INFO:bot_orchestrator:binance_signal_status accepted=2192 signals=15 stale=0 stale_lag=0 spread_rejects=0 strike=79998.0507 microprice=79993.5769 ofi=0.0001 imbalance=0.3854
+INFO:bot_orchestrator:binance_signal_status accepted=2258 signals=15 stale=0 stale_lag=0 spread_rejects=0 strike=79998.0507 microprice=79993.5769 ofi=0.2728 imbalance=0.3799
+INFO:bot_orchestrator:binance_signal_status accepted=2367 signals=15 stale=0 stale_lag=0 spread_rejects=0 strike=79998.0507 microprice=79993.5750 ofi=-0.0001 imbalance=-0.0086
+INFO:bot_orchestrator:binance_signal_status accepted=2482 signals=15 stale=0 stale_lag=0 spread_rejects=0 strike=79998.0507 microprice=79993.5747 ofi=0.1999 imbalance=-0.0654
+INFO:bot_orchestrator:binance_signal_status accepted=2580 signals=15 stale=0 stale_lag=0 spread_rejects=0 strike=79998.0507 microprice=79993.5779 ofi=-0.0034 imbalance=0.5767
+INFO:bot_orchestrator:binance_signal_decision action=NO_BUY reason=edge_below_min side=YES token_id=24343349703859790677235566466710159759921438321169028021734125747850858788044 ask=0.5200 quote_age_us=230 tte_us=201754537 edge=-0.0495
+INFO:bot_orchestrator:binance_signal_decision action=NO_BUY reason=edge_below_min side=YES token_id=24343349703859790677235566466710159759921438321169028021734125747850858788044 ask=0.5800 quote_age_us=2722 tte_us=200741726 edge=-0.0613
+INFO:bot_orchestrator:binance_signal_status accepted=2782 signals=17 stale=0 stale_lag=0 spread_rejects=1 strike=79998.0507 microprice=80009.3999 ofi=0.0037 imbalance=0.9755
+INFO:bot_orchestrator:binance_signal_decision action=NO_BUY reason=edge_below_min side=YES token_id=24343349703859790677235566466710159759921438321169028021734125747850858788044 ask=0.5900 quote_age_us=6790 tte_us=199740844 edge=-0.0059
+INFO:bot_orchestrator:binance_signal_status accepted=3181 signals=18 stale=0 stale_lag=0 spread_rejects=1 strike=79998.0507 microprice=80010.7200 ofi=0.0000 imbalance=0.9937
+INFO:bot_orchestrator:binance_signal_status accepted=3260 signals=18 stale=0 stale_lag=0 spread_rejects=1 strike=79998.0507 microprice=80010.7200 ofi=0.1046 imbalance=0.9976
+INFO:bot_orchestrator:binance_signal_status accepted=3309 signals=18 stale=0 stale_lag=0 spread_rejects=1 strike=79998.0507 microprice=80010.7188 ofi=0.0010 imbalance=0.7538
+INFO:bot_orchestrator:binance_signal_decision action=NO_BUY reason=edge_below_min side=YES token_id=24343349703859790677235566466710159759921438321169028021734125747850858788044 ask=0.7400 quote_age_us=98439 tte_us=183255949 edge=-0.0785
+INFO:bot_orchestrator:binance_signal_decision action=NO_BUY reason=edge_below_min side=YES token_id=24343349703859790677235566466710159759921438321169028021734125747850858788044 ask=0.7400 quote_age_us=318 tte_us=182201970 edge=-0.0781
+INFO:bot_orchestrator:binance_signal_decision action=NO_BUY reason=edge_below_min side=YES token_id=24343349703859790677235566466710159759921438321169028021734125747850858788044 ask=0.7600 quote_age_us=1283 tte_us=181147562 edge=-0.0774
+INFO:bot_orchestrator:binance_signal_decision action=NO_BUY reason=edge_below_min side=YES token_id=24343349703859790677235566466710159759921438321169028021734125747850858788044 ask=0.7700 quote_age_us=8887 tte_us=180131660 edge=-0.1731
+INFO:bot_orchestrator:binance_signal_status accepted=3531 signals=23 stale=0 stale_lag=0 spread_rejects=1 strike=79998.0507 microprice=80024.5176 ofi=0.0147 imbalance=0.5141
+INFO:bot_orchestrator:binance_signal_decision action=NO_BUY reason=edge_below_min side=YES token_id=24343349703859790677235566466710159759921438321169028021734125747850858788044 ask=0.7900 quote_age_us=14746 tte_us=179098492 edge=-0.1833
+INFO:bot_orchestrator:binance_signal_decision action=NO_BUY reason=edge_below_min side=YES token_id=24343349703859790677235566466710159759921438321169028021734125747850858788044 ask=0.7900 quote_age_us=11072 tte_us=178081628 edge=-0.0359
+INFO:bot_orchestrator:binance_signal_decision action=NO_BUY reason=edge_below_min side=YES token_id=24343349703859790677235566466710159759921438321169028021734125747850858788044 ask=0.7700 quote_age_us=9941 tte_us=177080693 edge=-0.1319
+INFO:bot_orchestrator:binance_signal_decision action=NO_BUY reason=edge_below_min side=YES token_id=24343349703859790677235566466710159759921438321169028021734125747850858788044 ask=0.8000 quote_age_us=3999 tte_us=176054773 edge=-0.0800
+INFO:bot_orchestrator:binance_signal_status accepted=3911 signals=26 stale=0 stale_lag=0 spread_rejects=1 strike=79998.0507 microprice=80044.6187 ofi=0.0007 imbalance=0.7352
+INFO:bot_orchestrator:binance_signal_status accepted=4106 signals=26 stale=0 stale_lag=0 spread_rejects=1 strike=79998.0507 microprice=80044.6154 ofi=0.1234 imbalance=0.0777
+INFO:bot_orchestrator:binance_signal_status accepted=4229 signals=26 stale=0 stale_lag=0 spread_rejects=1 strike=79998.0507 microprice=80044.6155 ofi=0.0001 imbalance=0.0905
+INFO:bot_orchestrator:binance_signal_status accepted=4320 signals=26 stale=0 stale_lag=0 spread_rejects=1 strike=79998.0507 microprice=80044.6168 ofi=0.0023 imbalance=0.3514
+INFO:bot_orchestrator:binance_signal_status accepted=4456 signals=26 stale=0 stale_lag=0 spread_rejects=1 strike=79998.0507 microprice=80044.6104 ofi=0.0025 imbalance=-0.9255
+INFO:bot_orchestrator:binance_signal_status accepted=4674 signals=26 stale=0 stale_lag=0 spread_rejects=1 strike=79998.0507 microprice=80044.6161 ofi=-0.0002 imbalance=0.2183
+INFO:bot_orchestrator:binance_signal_decision action=NO_BUY reason=edge_below_min side=NO token_id=66500934797975932877977737549496976050687312624425236711589657807785601377500 ask=0.1300 quote_age_us=729 tte_us=148171809 edge=-0.0234
+INFO:bot_orchestrator:binance_signal_decision action=NO_BUY reason=edge_below_min side=NO token_id=66500934797975932877977737549496976050687312624425236711589657807785601377500 ask=0.1600 quote_age_us=10004 tte_us=147140682 edge=-0.0542
+INFO:bot_orchestrator:binance_signal_status accepted=4924 signals=28 stale=0 stale_lag=0 spread_rejects=1 strike=79998.0507 microprice=80043.8880 ofi=-0.0200 imbalance=0.5940
+INFO:bot_orchestrator:binance_signal_decision action=NO_BUY reason=edge_below_min side=NO token_id=66500934797975932877977737549496976050687312624425236711589657807785601377500 ask=0.1200 quote_age_us=9739 tte_us=139178879 edge=-0.0157
+INFO:bot_orchestrator:binance_signal_status accepted=5183 signals=29 stale=0 stale_lag=0 spread_rejects=1 strike=79998.0507 microprice=80041.4006 ofi=0.0001 imbalance=-0.8851
+INFO:bot_orchestrator:binance_signal_decision action=NO_BUY reason=edge_below_min side=NO token_id=66500934797975932877977737549496976050687312624425236711589657807785601377500 ask=0.1200 quote_age_us=16896 tte_us=138131703 edge=-0.0038
+INFO:bot_orchestrator:binance_signal_decision action=NO_BUY reason=edge_below_min side=NO token_id=66500934797975932877977737549496976050687312624425236711589657807785601377500 ask=0.1500 quote_age_us=13281 tte_us=137130612 edge=-0.0371
+INFO:bot_orchestrator:binance_signal_status accepted=5301 signals=31 stale=0 stale_lag=0 spread_rejects=1 strike=79998.0507 microprice=80041.4044 ofi=-0.0001 imbalance=-0.1205
+INFO:bot_orchestrator:binance_signal_status accepted=5331 signals=31 stale=0 stale_lag=0 spread_rejects=1 strike=79998.0507 microprice=80041.4043 ofi=-0.0001 imbalance=-0.1323
+INFO:bot_orchestrator:binance_signal_status accepted=5420 signals=31 stale=0 stale_lag=0 spread_rejects=1 strike=79998.0507 microprice=80041.4045 ofi=0.0001 imbalance=-0.1027
+INFO:bot_orchestrator:binance_signal_decision action=NO_BUY reason=ask_above_limit side=YES token_id=24343349703859790677235566466710159759921438321169028021734125747850858788044 ask=0.9100 quote_age_us=311 tte_us=119726180 edge=0.0000
+INFO:bot_orchestrator:binance_signal_status accepted=5764 signals=32 stale=0 stale_lag=0 spread_rejects=1 strike=79998.0507 microprice=80049.9964 ofi=0.0001 imbalance=0.2846
+INFO:bot_orchestrator:binance_signal_decision action=NO_BUY reason=ask_above_limit side=YES token_id=24343349703859790677235566466710159759921438321169028021734125747850858788044 ask=0.9400 quote_age_us=2939 tte_us=117581014 edge=0.0000
+INFO:bot_orchestrator:binance_signal_status accepted=6070 signals=33 stale=0 stale_lag=0 spread_rejects=1 strike=79998.0507 microprice=80051.9176 ofi=0.0001 imbalance=0.5203
+INFO:bot_orchestrator:binance_signal_decision action=NO_BUY reason=ask_above_limit side=YES token_id=24343349703859790677235566466710159759921438321169028021734125747850858788044 ask=0.9600 quote_age_us=17591 tte_us=109984808 edge=0.0000
+INFO:bot_orchestrator:binance_signal_decision action=NO_BUY reason=ask_below_limit side=NO token_id=66500934797975932877977737549496976050687312624425236711589657807785601377500 ask=0.0500 quote_age_us=5948 tte_us=109363629 edge=0.0000
+INFO:bot_orchestrator:binance_signal_decision action=NO_BUY reason=ask_below_limit side=NO token_id=66500934797975932877977737549496976050687312624425236711589657807785601377500 ask=0.0600 quote_age_us=2615 tte_us=108331778 edge=0.0000
+INFO:bot_orchestrator:binance_signal_status accepted=6485 signals=36 stale=0 stale_lag=0 spread_rejects=1 strike=79998.0507 microprice=80049.9966 ofi=-0.0001 imbalance=0.3210
+INFO:bot_orchestrator:binance_signal_status accepted=6615 signals=36 stale=0 stale_lag=0 spread_rejects=1 strike=79998.0507 microprice=80049.9947 ofi=-0.0001 imbalance=-0.0571
+INFO:bot_orchestrator:binance_signal_status accepted=6725 signals=36 stale=0 stale_lag=0 spread_rejects=1 strike=79998.0507 microprice=80049.9945 ofi=0.0001 imbalance=-0.0950
+INFO:bot_orchestrator:binance_signal_status accepted=6857 signals=36 stale=0 stale_lag=0 spread_rejects=1 strike=79998.0507 microprice=80049.9974 ofi=-0.0200 imbalance=0.4720
+INFO:bot_orchestrator:binance_signal_status accepted=6959 signals=36 stale=0 stale_lag=0 spread_rejects=1 strike=79998.0507 microprice=80049.9960 ofi=0.0001 imbalance=0.2045
+INFO:bot_orchestrator:binance_signal_status accepted=7031 signals=36 stale=0 stale_lag=0 spread_rejects=1 strike=79998.0507 microprice=80049.9981 ofi=0.0001 imbalance=0.6149
+INFO:bot_orchestrator:binance_signal_decision action=NO_BUY reason=ask_below_limit side=NO token_id=66500934797975932877977737549496976050687312624425236711589657807785601377500 ask=0.0400 quote_age_us=805 tte_us=77404889 edge=0.0000
+INFO:bot_orchestrator:binance_signal_status accepted=7157 signals=37 stale=0 stale_lag=0 spread_rejects=1 strike=79998.0507 microprice=80046.3003 ofi=0.1046 imbalance=-0.9357
+INFO:bot_orchestrator:binance_signal_decision action=NO_BUY reason=ask_below_limit side=NO token_id=66500934797975932877977737549496976050687312624425236711589657807785601377500 ask=0.0600 quote_age_us=1437 tte_us=76025888 edge=0.0000
+INFO:bot_orchestrator:binance_signal_status accepted=7300 signals=38 stale=0 stale_lag=0 spread_rejects=1 strike=79998.0507 microprice=80046.3011 ofi=0.0062 imbalance=-0.7837
+INFO:bot_orchestrator:binance_signal_status accepted=7365 signals=38 stale=0 stale_lag=0 spread_rejects=1 strike=79998.0507 microprice=80046.3021 ofi=-0.0001 imbalance=-0.5811
+INFO:bot_orchestrator:binance_signal_decision action=NO_BUY reason=ask_below_limit side=NO token_id=66500934797975932877977737549496976050687312624425236711589657807785601377500 ask=0.0500 quote_age_us=1503 tte_us=64281031 edge=0.0000
+INFO:bot_orchestrator:binance_signal_decision action=NO_BUY reason=ask_below_limit side=NO token_id=66500934797975932877977737549496976050687312624425236711589657807785601377500 ask=0.0600 quote_age_us=1071 tte_us=63280965 edge=0.0000
+INFO:bot_orchestrator:binance_signal_decision action=BUY reason=edge_ok side=NO token_id=66500934797975932877977737549496976050687312624425236711589657807785601377500 ask=0.1900 quote_age_us=347 tte_us=62275262 edge=0.2656
+WARNING:bot_orchestrator:entry_hot_path_result side=NO result=HotPathResult(submitted=False, reason='max_positions', order_id='', latency_ns=0, response=None)
+INFO:bot_orchestrator:binance_signal_status accepted=7737 signals=41 stale=0 stale_lag=0 spread_rejects=1 strike=79998.0507 microprice=80016.7513 ofi=-0.0011 imbalance=-0.7410
+INFO:bot_orchestrator:binance_signal_decision action=BUY reason=edge_ok side=NO token_id=66500934797975932877977737549496976050687312624425236711589657807785601377500 ask=0.2600 quote_age_us=4693 tte_us=61270852 edge=0.1429
+WARNING:bot_orchestrator:entry_hot_path_result side=NO result=HotPathResult(submitted=False, reason='max_positions', order_id='', latency_ns=0, response=None)
+INFO:bot_orchestrator:binance_signal_decision action=NO_BUY reason=edge_below_min side=YES token_id=24343349703859790677235566466710159759921438321169028021734125747850858788044 ask=0.7700 quote_age_us=6022 tte_us=58432877 edge=0.0439
+INFO:bot_orchestrator:binance_signal_decision action=BUY reason=edge_ok side=YES token_id=24343349703859790677235566466710159759921438321169028021734125747850858788044 ask=0.7900 quote_age_us=10524 tte_us=57381791 edge=0.0829
+WARNING:bot_orchestrator:entry_hot_path_result side=YES result=HotPathResult(submitted=False, reason='submit_failed', order_id='0xada5d9532fcb7c95f4ae03fc2ec8ac73a141d18d5668826372859cdd536cf527', latency_ns=549239557, response={'error': 'no orders found to match with FAK order. FAK orders are partially filled or killed if no match is found.', 'orderID': '0xada5d9532fcb7c95f4ae03fc2ec8ac73a141d18d5668826372859cdd536cf527', '_http_status': 400, '_order_id': '0xada5d9532fcb7c95f4ae03fc2ec8ac73a141d18d5668826372859cdd536cf527'})
+INFO:bot_orchestrator:binance_signal_status accepted=7952 signals=44 stale=0 stale_lag=0 spread_rejects=1 strike=79998.0507 microprice=80021.5681 ofi=-0.1826 imbalance=0.6223
+INFO:bot_orchestrator:binance_signal_decision action=NO_BUY reason=ask_above_limit side=YES token_id=24343349703859790677235566466710159759921438321169028021734125747850858788044 ask=0.8700 quote_age_us=2703 tte_us=52145822 edge=0.0000
+INFO:bot_orchestrator:binance_signal_status accepted=8155 signals=45 stale=0 stale_lag=0 spread_rejects=1 strike=79998.0507 microprice=80027.4694 ofi=-0.2728 imbalance=0.8831
+INFO:bot_orchestrator:binance_signal_decision action=NO_BUY reason=ask_above_limit side=YES token_id=24343349703859790677235566466710159759921438321169028021734125747850858788044 ask=0.9100 quote_age_us=665 tte_us=51130956 edge=0.0000
+INFO:bot_orchestrator:binance_signal_status accepted=8241 signals=46 stale=0 stale_lag=0 spread_rejects=1 strike=79998.0507 microprice=80027.4671 ofi=-0.0001 imbalance=0.4103
+INFO:bot_orchestrator:binance_signal_status accepted=8368 signals=46 stale=0 stale_lag=0 spread_rejects=1 strike=79998.0507 microprice=80027.4602 ofi=0.0015 imbalance=-0.9680
+INFO:bot_orchestrator:binance_signal_status accepted=8445 signals=46 stale=0 stale_lag=0 spread_rejects=1 strike=79998.0507 microprice=80027.4643 ofi=0.1925 imbalance=-0.1478
+INFO:bot_orchestrator:binance_signal_status accepted=8586 signals=46 stale=0 stale_lag=0 spread_rejects=1 strike=79998.0507 microprice=80027.4652 ofi=0.2728 imbalance=0.0417
+INFO:bot_orchestrator:binance_signal_status accepted=8683 signals=46 stale=0 stale_lag=0 spread_rejects=1 strike=79998.0507 microprice=80027.4675 ofi=0.0001 imbalance=0.4987
+INFO:bot_orchestrator:binance_signal_decision action=NO_BUY reason=near_expiry side=YES token_id=24343349703859790677235566466710159759921438321169028021734125747850858788044 ask=0.9700 quote_age_us=8361 tte_us=22284933 edge=0.0000
+INFO:bot_orchestrator:binance_signal_status accepted=8895 signals=47 stale=0 stale_lag=0 spread_rejects=1 strike=79998.0507 microprice=80040.5253 ofi=-0.0001 imbalance=0.0677
+INFO:bot_orchestrator:binance_signal_status accepted=9032 signals=47 stale=0 stale_lag=0 spread_rejects=1 strike=79998.0507 microprice=80040.5278 ofi=-0.1046 imbalance=0.5695
+INFO:bot_orchestrator:binance_signal_decision action=NO_BUY reason=near_expiry side=YES token_id=24343349703859790677235566466710159759921438321169028021734125747850858788044 ask=0.0000 quote_age_us=3872 tte_us=14509834 edge=0.0000
+INFO:bot_orchestrator:binance_signal_decision action=NO_BUY reason=near_expiry side=YES token_id=24343349703859790677235566466710159759921438321169028021734125747850858788044 ask=1.0000 quote_age_us=72460 tte_us=13431604 edge=0.0000
+INFO:bot_orchestrator:binance_signal_status accepted=9328 signals=49 stale=0 stale_lag=0 spread_rejects=1 strike=79998.0507 microprice=80056.4610 ofi=-0.0626 imbalance=-0.7992
+INFO:bot_orchestrator:binance_signal_status accepted=9399 signals=49 stale=0 stale_lag=0 spread_rejects=1 strike=79998.0507 microprice=80056.4616 ofi=0.0003 imbalance=-0.6795
+INFO:bot_orchestrator:binance_signal_status accepted=9474 signals=49 stale=0 stale_lag=0 spread_rejects=1 strike=79998.0507 microprice=80056.4608 ofi=-0.0001 imbalance=-0.8468
+INFO:bot_orchestrator:binance_signal_decision action=NO_BUY reason=near_expiry side=NO token_id=66500934797975932877977737549496976050687312624425236711589657807785601377500 ask=0.0100 quote_age_us=329 tte_us=0 edge=0.0000
+INFO:bot_orchestrator:binance_signal_decision action=NO_BUY reason=near_expiry side=YES token_id=24343349703859790677235566466710159759921438321169028021734125747850858788044 ask=1.0000 quote_age_us=14997 tte_us=0 edge=0.0000
+WARNING:bot_orchestrator:anchor_resolved slug_ts=1777924200 samples=138 strike=80033.3568
+INFO:httpx:HTTP Request: GET https://clob.polymarket.com/tick-size?token_id=18474889164843862230765437307129740945671562029370278277443805165673288718170 "HTTP/2 200 OK"
+INFO:httpx:HTTP Request: GET https://clob.polymarket.com/tick-size?token_id=103458309720649086704727954002597105135685716557570454709309735818971376870417 "HTTP/2 200 OK"
+INFO:httpx:HTTP Request: GET https://clob.polymarket.com/neg-risk?token_id=18474889164843862230765437307129740945671562029370278277443805165673288718170 "HTTP/2 200 OK"
+INFO:httpx:HTTP Request: GET https://clob.polymarket.com/neg-risk?token_id=103458309720649086704727954002597105135685716557570454709309735818971376870417 "HTTP/2 200 OK"
+INFO:bot_orchestrator:binance_signal_decision action=NO_BUY reason=edge_below_min side=NO token_id=18474889164843862230765437307129740945671562029370278277443805165673288718170 ask=0.6300 quote_age_us=1774 tte_us=296080870 edge=-0.0806
+INFO:bot_orchestrator:binance_signal_status accepted=10192 signals=52 stale=0 stale_lag=0 spread_rejects=21 strike=80033.3568 microprice=80009.9625 ofi=-0.1769 imbalance=-0.4934
+INFO:bot_orchestrator:binance_signal_decision action=NO_BUY reason=edge_below_min side=NO token_id=18474889164843862230765437307129740945671562029370278277443805165673288718170 ask=0.6300 quote_age_us=15396 tte_us=295031640 edge=-0.0650
