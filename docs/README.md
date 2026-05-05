@@ -38,9 +38,8 @@ Startup is intentionally guarded:
 - Keep debug output in standalone probe mode or exception/status paths only.
 - Sell decisions must use `LocalOrderTracker` sellable inventory from user-channel confirmations.
 - `LocalOrderTracker` now distinguishes:
-  - `owned`: local exposure seen once a trade reaches `MATCHED`
   - `sellable`: MATCHED exposure is immediately sellable (no CONFIRMED wait). This lets exits fire faster — the venue accepts sells against just-matched inventory.
-  - `owned`: local exposure tracked from `MATCHED` onward.
+  - `owned`: local exposure tracked from MATCHED onward.
 - Exit inventory is floored to the venue-supported `0.01` share quantum before
   it is treated as sellable or position-bearing. Residual dust below `0.01`
   remains in raw tracker accounting but does not trigger invalid zero-size SELL
@@ -53,25 +52,77 @@ Startup is intentionally guarded:
 ## Current Implementation Map
 
 - `runtime_wiring.py` builds shared runtime objects.
-- `minimal_live_bot.py` starts the coherent EC2 runtime, supervises market WS, user WS, Binance SBE, exit evaluation, stale cancellation, and shutdown cleanup.
+- `minimal_live_bot.py` starts the coherent EC2 runtime, supervises market WS, user WS, Binance SBE, exit evaluation, stale cancellation, and shutdown cleanup. Wires already-derived Polymarket API credentials into the user-channel WSS (no second independent credential-derivation path). Configures `MINIMAL_MAX_NOTIONAL_OVERRUN` and `MINIMAL_MAX_NOTIONAL_OVERRUN_BPS` for the entry armory.
 - `cold_latency_probe.py` measures local buy/sell hot-path placement latency with a stub submitter and no live exchange calls.
-- `bot_orchestrator.py` routes market/user/Binance/exit events.
+- `bot_orchestrator.py` routes market/user/Binance/exit events. Includes sampled exit diagnostics (`exit_diag`) throttled to one line per 5s. Logs `entry_hot_path_result` and `exit_hot_path_result` at WARNING level.
 - `runtime_state.py` owns active market and quote state (including L2 bid/ask depth, preserved across top-of-book-only updates).
 - `polymarket_market_feed.py` converts market websocket packets into quote/market state updates, extracting and preserving L2 depth from book snapshots.
 - `binance_signal_engine.py` converts Binance best-bid/ask movement into directional signals.
 - `signal_decision.py` gates buy decisions.
-- `template_armory.py` prebuilds entry order templates.
+- `template_armory.py` prebuilds entry order templates. Uses `canonical_buy_target_for_notional()` to choose a venue-valid BUY size that does not silently exceed the configured trade notional beyond `max_notional_overrun` (default $0.01). Rejects at armory level when no valid size satisfies both venue minimum and notional cap. Stores armed state from template actuals (post-canonicalization).
 - `exit_policy.py` decides take-profit, stop-loss, expiry, and time exits.
-- `exit_armory.py` prebuilds sell templates from exit decisions.
-- `hot_path_engine.py` checks quote, inventory, and one-position-cycle guards, then submits armed templates.
-- `order_tracker.py` tracks user-channel orders, fills, `owned`, `settled`, reserved inventory, confirmed `sellable`, cost basis, exposure state, stale live order ids, and currently live order ids.
-- `fast_order_submitter.py` submits prebuilt signed order bodies with fresh L2 headers and batches order cancels through `DELETE /orders`.
-- `fast_order_submitter.py` signs order templates with `py_clob_client_v2` in the background but keeps the hot path as raw prebuilt body bytes plus fresh L2 headers.
+- `exit_armory.py` prebuilds sell templates from exit decisions. Logs previously-silent failures (`exit_armory_prepare_failed`, `exit_armory_not_armed`) without hot-path spam.
+- `hot_path_engine.py` checks quote, inventory, and one-position-cycle guards, then submits armed templates. Uses `Decimal` fields directly from `FastOrderTemplate`.
+- `order_tracker.py` tracks user-channel orders, fills, `owned`, `settled`, reserved inventory, confirmed `sellable`, cost basis, exposure state, stale live order ids, and currently live order ids. Includes race-safe trade-to-submit bind (`_match_submit_from_trade_msg`) so a WSS trade arriving before its order event can still reconcile.
+- `fast_order_submitter.py` — **signed-body validation boundary**. `prepare_template()` canonicalizes order params (Decimal-first, no float churn), signs via the V2 SDK, then validates the serialized signed body before returning: maker amount ≤2dp, taker amount ≤4dp, implied price tick-aligned, implied price equals canonical price. No SDK global `ROUNDING_CONFIG` monkeypatch. Rejects invalid bodies locally before HTTP submit.
+- `user_channel_ws.py` — app-level 10s PING (protocol pings disabled per official docs). Sparse lifecycle logs (`user_ws_connecting`, `user_ws_connected`, `user_ws_auth_sent`, `user_ws_disconnected`). Non-trade payloads logged as `user_ws_control_payload`. Credentials accepted via explicit parameters; independent credential derivation only used as fallback.
+
+## Signed-Body Validation (Order Construction Boundary)
+
+All orders flow through `fast_order_submitter.prepare_template()` which enforces:
+
+1. **Input canonicalization** via `canonical_order_params()`:
+   - BUY: price ceil-to-tick, size floor-to-4dp then adjusted via gcd-based lattice math so `price × size` is 2dp-aligned
+   - SELL: price floor-to-tick, size floor-to-2dp
+
+2. **Serialized signed-body inspection** after SDK signing:
+   - `makerAmount` aligned to `MAKER_AMOUNT_STEP = 0.01` (2dp)
+   - `takerAmount` aligned to `TAKER_AMOUNT_STEP = 0.0001` (4dp)
+   - Implied price (`maker/taker` for BUY, `taker/maker` for SELL) aligned to `PRICE_TICK = 0.01`
+   - Implied price equals canonical input price
+
+3. **Rejection before HTTP**: any violation raises `ValueError` locally. No invalid body reaches `FastOrderSubmitter.submit()`.
+
+The V2 SDK default `ROUNDING_CONFIG` has `amount=5,6` for tick sizes 0.001/0.0001 (GitHub #253). This code does NOT mutate SDK globals — it canonicalizes inputs and validates outputs instead.
+
+## Entry BUY Sizing with Notional Bounds
+
+`TemplateArmory` delegates to `canonical_buy_target_for_notional()` which computes floor and ceil lattice sizes, then chooses:
+
+- **Prefer ceil** when `ceil_maker ≤ target_usdc + max(max_notional_overrun, bps_overrun)`
+- **Fall back to floor** when ceil exceeds the tolerance
+- **Reject locally** when neither satisfies both `min_maker_amount` (venue minimum USDC) and `max_allowed_maker` (notional cap)
+
+Default tolerance: `max_notional_overrun = $0.01`, `max_notional_overrun_bps = 0`.
+
+Key examples under default tolerance:
+
+| Price | Target | Floor (maker) | Ceil (maker) | Chosen |
+|-------|--------|---------------|--------------|--------|
+| 0.48 | $10 | 20.8125 ($9.99) | 20.8750 ($10.02 > $10.01) | floor $9.99 |
+| 0.51 | $10 | 19.0000 ($9.69) | 20.0000 ($10.20) | floor $9.69 |
+| 0.50 | $10 | 20.0000 ($10.00) | 20.0000 ($10.00) | ceil $10.00 |
+| 0.67 | $1.01 | 1.0000 ($0.67 < $1.01) | 2.0000 ($1.34) | reject |
+| 0.51 | $1.01 | 1.0000 ($0.51 < $1.01) | 2.0000 ($1.02 ≤ $1.02) | ceil $1.02 |
+
+Precision canonicalization is not allowed to silently redefine trading risk.
+
+## Exit Observability
+
+Exit diagnostics are sampled (one line per 5s max) via `bot_orchestrator._maybe_log_exit_diag()`. Silent gates in `evaluate_exit()` now emit `exit_diag` with reason, asset, owned, sellable, bid, ask, and quote age. Idle `no_owned_assets` is suppressed unless an unconfirmed entry submit exists (`no_owned_assets_after_entry_submit`).
+
+`exit_armory.py` logs failures that were previously swallowed: `exit_armory_prepare_failed` (build template exception), `exit_armory_not_armed` (post-await template mismatch). Failures are deduplicated — `prepare_failed` flag suppresses `not_armed` when the build already failed.
+
+## User WSS Lifecycle
+
+`user_channel_ws.py` uses app-level 10s PING (protocol pings disabled). Lifecycle logs at WARNING: `user_ws_connecting`, `user_ws_connected`, `user_ws_auth_sent`, `user_ws_disconnected` (with exception traceback). Non-trade payloads logged as `user_ws_control_payload`. API credentials are injected from `LiveBot` (already-derived), removing the second independent credential-derivation path from the production runtime.
 
 ## Runtime Knobs
 
 - `MINIMAL_CANCEL_INTERVAL_S`: stale-order scan interval, default `0.25`.
 - `MINIMAL_CANCEL_STALE_ORDER_S`: live-order age before batch cancel, default `2.0`.
+- `MINIMAL_MAX_NOTIONAL_OVERRUN`: max USD over target notional for BUY ceil sizing, default `0.01`.
+- `MINIMAL_MAX_NOTIONAL_OVERRUN_BPS`: max bps over target notional for BUY ceil sizing, default `0`.
 
 ## Strike Anchoring
 
@@ -142,8 +193,9 @@ are fitted.
 ## FAK Latency
 
 `FastOrderSubmitter.submit` enforces a per-request `aiohttp.ClientTimeout`
-of `total=1.0s, sock_connect=0.3s, sock_read=1.0s` so a stuck socket fails
-fast instead of riding the session-wide 3 s timeout. Session keepalive is
+of `total=2.0s, sock_connect=0.5s, sock_read=2.0s`. This accommodates
+eu-west-1 → Polymarket US RTT (~300-400ms base + p95 jitter). Previously
+1.0s which timed out every submit from eu-west-1. Session keepalive is
 75 s with persistent connection pool (`POLY_HTTP_CONN_LIMIT=8`).
 
 The single biggest remaining latency win — moving the bot to `us-east-1`
