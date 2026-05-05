@@ -104,7 +104,7 @@ class HotPathEngine:
             template=template,
             guard=guard,
             side=template.side.upper(),
-            size=Decimal(str(template.size)),
+            size=template.size,
         )
         self._fired.discard(key)
 
@@ -186,7 +186,7 @@ class HotPathEngine:
                 template.token_id,
                 armed.side,
                 armed.size,
-                Decimal(str(template.price)),
+                template.price,
                 now_ts=start_ns / _NS_PER_S,
             )
         attempted_submit = False

@@ -4,6 +4,7 @@ import hashlib
 import hmac
 import time
 from dataclasses import dataclass
+from decimal import Decimal, ROUND_CEILING, ROUND_DOWN, InvalidOperation
 from typing import Any, Callable
 
 import aiohttp
@@ -13,11 +14,9 @@ from py_clob_client.clob_types import OrderArgs
 
 try:
     from py_clob_client_v2.clob_types import OrderArgs as OrderArgsV2
-    from py_clob_client_v2.order_builder.builder import ROUNDING_CONFIG as V2_ROUNDING_CONFIG
     from py_clob_client_v2.order_utils.model.order_data_v2 import order_to_json_v2
 except ImportError:  # pragma: no cover - exercised only when optional v2 SDK is absent.
     OrderArgsV2 = None
-    V2_ROUNDING_CONFIG = None
     order_to_json_v2 = None
 
 
@@ -32,6 +31,50 @@ _ORDER_POST_TIMEOUT = aiohttp.ClientTimeout(
     sock_connect=0.5,
     sock_read=2.0,
 )
+
+PRICE_TICK = Decimal("0.01")
+SIZE_STEP = Decimal("0.01")
+
+
+def _dec(value) -> Decimal:
+    if isinstance(value, Decimal):
+        return value
+    try:
+        return Decimal(str(value))
+    except (InvalidOperation, ValueError, TypeError):
+        return Decimal("0")
+
+
+def _floor_to_step(value: Decimal, step: Decimal) -> Decimal:
+    if step <= 0:
+        return value
+    return (value / step).to_integral_value(rounding=ROUND_DOWN) * step
+
+
+def _ceil_to_step(value: Decimal, step: Decimal) -> Decimal:
+    if step <= 0:
+        return value
+    return (value / step).to_integral_value(rounding=ROUND_CEILING) * step
+
+
+def _canonical_order_params(*, side: str, price, size, tick: Decimal = PRICE_TICK) -> tuple[Decimal, Decimal]:
+    side_u = str(side or "").upper()
+    price_d = _dec(price)
+    size_d = _dec(size)
+
+    if side_u == "BUY":
+        q_price = _ceil_to_step(price_d, tick)
+    elif side_u == "SELL":
+        q_price = _floor_to_step(price_d, tick)
+    else:
+        raise ValueError(f"invalid order side: {side!r}")
+
+    q_size = _floor_to_step(size_d, SIZE_STEP)
+
+    if q_price <= 0 or q_size <= 0:
+        raise ValueError(f"invalid canonical order params side={side_u} price={q_price} size={q_size}")
+
+    return q_price, q_size
 
 
 # DUPLICATED: also in order_placer.py:56.  Consolidate if either file is refactored.
@@ -64,21 +107,6 @@ def build_order_body(
 
 def _is_v2_signed_order(signed_order: Any) -> bool:
     return hasattr(signed_order, "timestamp") and hasattr(signed_order, "builder")
-
-
-def _patch_v2_rounding_for_venue() -> None:
-    """Venue requires makerAmount ≤ 2dp, takerAmount ≤ 4dp.
-
-    Setting amount=2 satisfies both: 2dp ≤ 4dp for takerAmount, and
-    makerAmount is always ≤ 2dp. Price is also capped at 2dp.
-    """
-    if V2_ROUNDING_CONFIG is None:
-        return
-    for _tick, round_config in V2_ROUNDING_CONFIG.items():
-        if getattr(round_config, "amount", 0) > 2:
-            round_config.amount = 2
-        if getattr(round_config, "price", 0) > 2:
-            round_config.price = 2
 
 
 def extract_order_id(obj: Any) -> str:
@@ -124,9 +152,10 @@ class FastOrderTemplate:
     name: str
     token_id: str
     side: str
-    price: float
-    size: float
+    price: Decimal
+    size: Decimal
     body_bytes: bytes
+    implied_price: Decimal | None = None
 
     def __post_init__(self) -> None:
         if not self.body_bytes:
@@ -189,6 +218,41 @@ class HeaderSigner:
         return headers
 
 
+def _order_dict_from_body(body: bytes) -> dict[str, object]:
+    obj = orjson.loads(body)
+    if not isinstance(obj, dict):
+        raise ValueError("signed_order_body_not_dict")
+    order = obj.get("order")
+    if isinstance(order, dict):
+        return order
+    return obj
+
+
+def _extract_amounts(order: dict[str, object]) -> tuple[Decimal, Decimal]:
+    maker_raw = order.get("makerAmount", order.get("maker_amount"))
+    taker_raw = order.get("takerAmount", order.get("taker_amount"))
+    maker = _dec(maker_raw)
+    taker = _dec(taker_raw)
+    if maker <= 0 or taker <= 0:
+        raise ValueError(f"signed_order_non_positive_amounts maker={maker} taker={taker}")
+    return maker, taker
+
+
+def _implied_price_from_amounts(*, side: str, maker: Decimal, taker: Decimal) -> Decimal:
+    side_u = side.upper()
+    if side_u == "SELL":
+        return taker / maker
+    if side_u == "BUY":
+        return maker / taker
+    raise ValueError(f"invalid order side: {side!r}")
+
+
+def _assert_tick_aligned(value: Decimal, tick: Decimal) -> None:
+    aligned = _floor_to_step(value, tick)
+    if value != aligned:
+        raise ValueError(f"signed_order_price_not_tick_aligned implied={value} tick={tick}")
+
+
 async def prepare_template(
     clob: ClobClient,
     *,
@@ -201,26 +265,50 @@ async def prepare_template(
     order_type: str,
     post_only: bool,
 ) -> FastOrderTemplate:
+    side_u = str(side or "").upper()
+    price_d, size_d = _canonical_order_params(
+        side=side_u,
+        price=price,
+        size=size,
+        tick=PRICE_TICK,
+    )
+
     order_args_cls = OrderArgsV2 if OrderArgsV2 is not None and _uses_v2_orders(clob) else OrderArgs
-    if order_args_cls is OrderArgsV2:
-        _patch_v2_rounding_for_venue()
+
     signed = await asyncio.to_thread(
         clob.create_order,
-        order_args_cls(token_id=token_id, price=float(price), size=float(size), side=side),
+        order_args_cls(
+            token_id=token_id,
+            price=float(price_d),
+            size=float(size_d),
+            side=side_u,
+        ),
     )
+
     body = build_order_body(
         signed if _is_v2_signed_order(signed) else signed.dict(),
         owner=owner,
         order_type=order_type,
         post_only=post_only,
     )
+
+    order = _order_dict_from_body(body)
+    maker, taker = _extract_amounts(order)
+    implied = _implied_price_from_amounts(side=side_u, maker=maker, taker=taker)
+    _assert_tick_aligned(implied, PRICE_TICK)
+    if implied != price_d:
+        raise ValueError(
+            f"signed_order_price_mismatch side={side_u} input={price_d} implied={implied}"
+        )
+
     return FastOrderTemplate(
         name=name,
         token_id=token_id,
-        side=side,
-        price=float(price),
-        size=float(size),
+        side=side_u,
+        price=price_d,
+        size=size_d,
         body_bytes=body,
+        implied_price=implied,
     )
 
 
