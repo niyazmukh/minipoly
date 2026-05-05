@@ -60,7 +60,7 @@ def _ceil_to_step(value: Decimal, step: Decimal) -> Decimal:
     return (value / step).to_integral_value(rounding=ROUND_CEILING) * step
 
 
-def _canonical_order_params(*, side: str, price, size, tick: Decimal = PRICE_TICK) -> tuple[Decimal, Decimal]:
+def canonical_order_params(*, side: str, price, size, tick: Decimal = PRICE_TICK) -> tuple[Decimal, Decimal]:
     side_u = str(side or "").upper()
     price_d = _dec(price)
     size_d = _dec(size)
@@ -310,7 +310,7 @@ async def prepare_template(
     post_only: bool,
 ) -> FastOrderTemplate:
     side_u = str(side or "").upper()
-    price_d, size_d = _canonical_order_params(
+    price_d, size_d = canonical_order_params(
         side=side_u,
         price=price,
         size=size,

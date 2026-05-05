@@ -3,7 +3,7 @@ import base64
 import hmac
 import hashlib
 import sys
-from decimal import Decimal
+from decimal import Decimal, ROUND_CEILING
 from pathlib import Path
 
 import pytest
@@ -18,9 +18,9 @@ from fast_order_submitter import (
     PRICE_TICK,
     _assert_tick_aligned,
     _ceil_buy_size_for_amount_precision,
-    _canonical_order_params,
     _floor_to_step,
     build_order_body,
+    canonical_order_params,
     extract_order_id,
     prepare_template,
 )
@@ -411,17 +411,47 @@ def test_valid_buy_bodies_pass(price: str, maker: str, taker: str) -> None:
     asyncio.run(_run())
 
 
-def test_canonical_buy_size_is_amount_precision_aligned() -> None:
-    """Property: for BUY, canonical size*price always has ≤2dp."""
-    from fast_order_submitter import _canonical_order_params, _ceil_buy_size_for_amount_precision
+def test_prepare_template_rejects_buy_body_with_taker_over_4dp() -> None:
+    """BUY with taker=0.015625 (>4dp) must be rejected locally."""
 
+    async def _run() -> None:
+        # maker=0.01 (2dp-aligned), taker=0.015625 (5dp)
+        # implied price = 0.01 / 0.015625 = 0.64 (tick-aligned)
+        clob = _MockClobClient(maker_amount="0.01", taker_amount="0.015625")
+        with pytest.raises(ValueError, match="signed_order_taker_amount_not_step_aligned"):
+            await prepare_template(
+                clob,
+                name="entry-yes",
+                token_id="yes",
+                side="BUY",
+                price=0.64,
+                size=0.015625,
+                owner="owner",
+                order_type="FAK",
+                post_only=False,
+            )
+
+    asyncio.run(_run())
+
+
+def test_canonical_buy_size_is_amount_precision_aligned() -> None:
+    """Property: for BUY, canonical size*price always has ≤2dp.
+
+    Simulates the real TemplateArmory flow: ceil_to_2dp(usdc_per_trade / price)
+    to produce the raw target, then canonical_order_params(...) adjusts for
+    amount precision.
+    """
+    from fast_order_submitter import canonical_order_params
+
+    usdc_per_trade = Decimal("10")
     prices = [Decimal(p) / Decimal("100") for p in range(1, 100)]
     for price_d in prices:
-        # simulate template_armory: 1.01 USDC / buy_limit
-        target_size = _floor_to_step(Decimal("1.01") / price_d, Decimal("0.0001"))
+        raw_size = (usdc_per_trade / price_d).quantize(
+            Decimal("0.01"), rounding=ROUND_CEILING
+        )
         try:
-            q_price, q_size = _canonical_order_params(
-                side="BUY", price=price_d, size=target_size
+            q_price, q_size = canonical_order_params(
+                side="BUY", price=price_d, size=raw_size
             )
         except ValueError:
             continue
@@ -434,4 +464,11 @@ def test_canonical_buy_size_is_amount_precision_aligned() -> None:
         )
         assert q_price == _floor_to_step(q_price, Decimal("0.01")), (
             f"BUY price={q_price} not tick-aligned"
+        )
+        assert maker / q_size == q_price, (
+            f"BUY implied price mismatch: maker={maker}/size={q_size} != price={q_price}"
+        )
+        # Current ceil-to-valid-size policy: canonical size >= target
+        assert q_size >= raw_size, (
+            f"BUY canonical size={q_size} < target size={raw_size}"
         )

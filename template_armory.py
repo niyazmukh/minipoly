@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR
 from typing import Awaitable, Callable, Protocol
 
-from fast_order_submitter import FastOrderTemplate
+from fast_order_submitter import FastOrderTemplate, canonical_order_params
 from hot_path_engine import HotPathGuard
 
 
@@ -142,25 +142,34 @@ class TemplateArmory:
         max_buy_limit = min(_MAX_CLOB_PRICE, self._cfg.max_buy_limit)
         if buy_limit < min_buy_limit or buy_limit > max_buy_limit:
             return False
-        size = ceil_to_2dp(self._cfg.usdc_per_trade / buy_limit)
-        if size < self._cfg.min_size:
+        raw_size = ceil_to_2dp(self._cfg.usdc_per_trade / buy_limit)
+        # min_size applies to the requested target size, not post-canonical.
+        if raw_size < self._cfg.min_size:
             return False
+
+        canonical_buy_limit, canonical_size = canonical_order_params(
+            side="BUY",
+            price=buy_limit,
+            size=raw_size,
+            tick=tick,
+        )
 
         key = signal.upper()
         prev = self._armed.get(key)
-        if prev is not None and not self._should_rearm(prev, token_id, buy_limit, size, tick):
+        if prev is not None and not self._should_rearm(prev, token_id, canonical_buy_limit, canonical_size, tick):
             return False
 
-        # Record the latest desired target for this signal; the in-flight
-        # background task will pick this up when it finishes the current sign.
+        # Record the latest desired canonical target for this signal; the
+        # in-flight background task will pick this up when it finishes the
+        # current sign.
         self._pending_target[key] = _PendingTarget(
             signal=key,
             token_id=token_id,
             bid=bid,
             ask=ask,
             tick=tick,
-            buy_limit=buy_limit,
-            size=size,
+            buy_limit=canonical_buy_limit,
+            size=canonical_size,
         )
         existing = self._inflight_task.get(key)
         if existing is None or existing.done():
@@ -192,6 +201,16 @@ class TemplateArmory:
                     min_ask=max(_MIN_CLOB_PRICE, self._cfg.min_buy_limit),
                     max_age_ns=self._cfg.max_quote_age_ns,
                 )
+                if template.price != target.buy_limit or template.size != target.size:
+                    _LOG.warning(
+                        "template_armory_size_diverged signal=%s "
+                        "target_price=%s template_price=%s target_size=%s template_size=%s",
+                        key,
+                        target.buy_limit,
+                        template.price,
+                        target.size,
+                        template.size,
+                    )
                 self._armed[key] = _ArmedState(
                     token_id=template.token_id,
                     buy_limit=template.price,
