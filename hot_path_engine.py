@@ -1,6 +1,6 @@
 import time
 from dataclasses import dataclass
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import Any, Callable, Protocol
 
 from fast_order_submitter import FastOrderTemplate, extract_order_id
@@ -9,6 +9,17 @@ from order_tracker import LocalOrderTracker
 
 _DEC_ZERO = Decimal("0")
 _NS_PER_S = 1_000_000_000
+
+
+def _dec(raw: Any) -> Decimal:
+    if raw is None:
+        return _DEC_ZERO
+    if isinstance(raw, Decimal):
+        return raw
+    try:
+        return Decimal(str(raw))
+    except (InvalidOperation, TypeError, ValueError):
+        return _DEC_ZERO
 
 
 class _Submitter(Protocol):
@@ -62,6 +73,7 @@ class HotPathEngine:
         "_in_flight_sell",
         "_fired",
         "_active_buy_assets",
+        "_exposure_scope",
         "_max_concurrent_positions",
     )
 
@@ -85,13 +97,16 @@ class HotPathEngine:
         self._in_flight_sell = False
         self._fired: set[str] = set()
         self._active_buy_assets: set[str] = set()
+        self._exposure_scope: set[str] = set()
 
     def set_exposure_scope(self, token_ids: set[str] | frozenset[str]) -> None:
         # Called after every market event.  Do NOT clear _armed here — that
         # was the root cause of "not_armed" (templates destroyed before
         # on_signal could use them).  Market rotation already calls
         # disarm_all() + armory.reset() separately.
-        return
+        self._exposure_scope = {str(token_id) for token_id in token_ids if token_id}
+        if self._exposure_scope:
+            self._active_buy_assets.intersection_update(self._exposure_scope)
 
     def disarm_all(self) -> None:
         self._armed.clear()
@@ -149,12 +164,20 @@ class HotPathEngine:
             # effectively means "how many sides can be entered."  Default 3
             # allows both YES and NO; set to 1 for single-side only.
             open_assets: set[str] = set()
-            open_assets.update(aid for aid, v in self._tracker.owned_by_asset.items() if v > 0)
-            open_assets.update(self._active_buy_assets)
+            scope = self._exposure_scope
+            for aid in self._tracker.owned_by_asset:
+                if scope and aid not in scope:
+                    continue
+                owned, _entry = self._tracker.position_size_and_entry(aid)
+                if owned > 0:
+                    open_assets.add(aid)
+            open_assets.update(aid for aid in self._active_buy_assets if not scope or aid in scope)
             for pending in self._tracker.pending_submits.values():
                 if pending.intent != "entry":
                     continue
                 if pending.status not in ("PENDING", "UNKNOWN", "CONFIRMED"):
+                    continue
+                if scope and pending.asset_id not in scope:
                     continue
                 open_assets.add(pending.asset_id)
             if len(open_assets) >= self._max_concurrent_positions:
@@ -165,10 +188,12 @@ class HotPathEngine:
             if template.token_id in open_assets:
                 return HotPathResult(False, "max_positions")
 
-        if armed.side == "BUY" and armed.guard.min_ask > 0 and quote.ask < armed.guard.min_ask:
-            return HotPathResult(False, "ask_below_guard")
-        if armed.guard.max_ask > 0 and (quote.ask <= 0 or quote.ask > armed.guard.max_ask):
-            return HotPathResult(False, "ask_above_guard")
+        # BUY-side ask guards are intentionally disabled. The venue-side FAK
+        # limit price in the signed order body remains the authoritative cap.
+        # if armed.side == "BUY" and armed.guard.min_ask > 0 and quote.ask < armed.guard.min_ask:
+        #     return HotPathResult(False, "ask_below_guard")
+        # if armed.guard.max_ask > 0 and (quote.ask <= 0 or quote.ask > armed.guard.max_ask):
+        #     return HotPathResult(False, "ask_above_guard")
         if armed.guard.min_bid > 0 and quote.bid < armed.guard.min_bid:
             return HotPathResult(False, "bid_below_guard")
         if armed.side == "SELL":
@@ -190,6 +215,7 @@ class HotPathEngine:
                 now_ts=start_ns / _NS_PER_S,
             )
         attempted_submit = False
+        keep_armed_after_attempt = False
         try:
             try:
                 attempted_submit = True
@@ -201,6 +227,7 @@ class HotPathEngine:
                 # inventory. Instead mark UNKNOWN and conservatively treat
                 # the cycle as if the order were live.
                 self._handle_unknown_submit(armed, template, submit_id, start_ns, repr(exc))
+                keep_armed_after_attempt = True
                 end_ns = self._now_ns()
                 return HotPathResult(
                     submitted=False,
@@ -223,13 +250,19 @@ class HotPathEngine:
                         self._active_buy_assets.add(template.token_id)
                     elif armed.side == "SELL":
                         self._active_buy_assets.discard(template.token_id)
-                        if self._tracker is not None:
-                            self._tracker.reserve_sell_order(
-                                order_id,
-                                template.token_id,
-                                armed.size,
-                                now_ts=start_ns / _NS_PER_S,
-                            )
+                    matched_response = self._record_matched_response_fill(
+                        armed,
+                        template,
+                        response,
+                        order_id,
+                    )
+                    if armed.side == "SELL" and self._tracker is not None and not matched_response:
+                        self._tracker.reserve_sell_order(
+                            order_id,
+                            template.token_id,
+                            armed.size,
+                            now_ts=start_ns / _NS_PER_S,
+                        )
                     end_ns = self._now_ns()
                     return HotPathResult(
                         submitted=True,
@@ -245,6 +278,7 @@ class HotPathEngine:
                     start_ns,
                     "accepted_missing_order_id",
                 )
+                keep_armed_after_attempt = True
                 end_ns = self._now_ns()
                 return HotPathResult(
                     submitted=False,
@@ -261,6 +295,7 @@ class HotPathEngine:
                     start_ns,
                     str(response.get("error") or response.get("_http_status") or "unknown"),
                 )
+                keep_armed_after_attempt = True
                 end_ns = self._now_ns()
                 return HotPathResult(
                     submitted=False,
@@ -287,7 +322,7 @@ class HotPathEngine:
                 response=response,
             )
         finally:
-            if attempted_submit:
+            if attempted_submit and not keep_armed_after_attempt:
                 self.disarm(key)
             # If we reach finally without having added to _active_buy_assets
             # (exception or unknown path), the BUY didn't create a real position
@@ -322,6 +357,40 @@ class HotPathEngine:
                 armed.size,
                 now_ts=start_ns / _NS_PER_S,
             )
+
+    def _record_matched_response_fill(
+        self,
+        armed: ArmedTemplate,
+        template: FastOrderTemplate,
+        response: dict[str, Any],
+        order_id: str,
+    ) -> bool:
+        if self._tracker is None or not order_id:
+            return False
+        status = str(response.get("status") or "").strip().upper()
+        if status not in {"MATCHED", "FILLED"}:
+            return False
+        taking = _dec(response.get("takingAmount"))
+        making = _dec(response.get("makingAmount"))
+        if armed.side == "BUY":
+            size = taking
+            price = making / taking if taking > 0 and making > 0 else _dec(template.price)
+        elif armed.side == "SELL":
+            size = making
+            price = taking / making if taking > 0 and making > 0 else _dec(template.price)
+        else:
+            return False
+        if size <= 0 or price <= 0:
+            return False
+        self._tracker.record_local_matched_fill(
+            order_id=order_id,
+            asset_id=template.token_id,
+            side=armed.side,
+            size=size,
+            price=price,
+            now_ts=self._now_ns() / _NS_PER_S,
+        )
+        return True
 
 
 # UNCALLED: remnant of removed buy-cycle lock.  Kept for reference.

@@ -200,12 +200,17 @@ class TemplateArmory:
                     side="BUY",
                     price=target.buy_limit,
                     size=target.size,
+                    tick=target.tick,
                     order_type=self._cfg.order_type,
                     post_only=self._cfg.post_only,
                 )
                 guard = HotPathGuard(
-                    max_ask=target.ask,
-                    min_ask=max(_MIN_CLOB_PRICE, self._cfg.min_buy_limit),
+                    # Disable local BUY ask guard; FAK venue matching against
+                    # the signed limit price is the authority.
+                    # max_ask=target.buy_limit,
+                    # min_ask=max(_MIN_CLOB_PRICE, self._cfg.min_buy_limit),
+                    max_ask=_DEC_ZERO,
+                    min_ask=_DEC_ZERO,
                     max_age_ns=self._cfg.max_quote_age_ns,
                 )
                 if template.price != target.buy_limit or template.size != target.size:
@@ -218,6 +223,7 @@ class TemplateArmory:
                         target.size,
                         template.size,
                     )
+                    continue
                 self._armed[key] = _ArmedState(
                     token_id=template.token_id,
                     buy_limit=template.price,

@@ -68,7 +68,7 @@ def canonical_order_params(*, side: str, price, size, tick: Decimal = PRICE_TICK
     if side_u == "BUY":
         q_price = _ceil_to_step(price_d, tick)
         q_size = _floor_to_step(size_d, TAKER_AMOUNT_STEP)
-        q_size = _ceil_buy_size_for_amount_precision(q_price, q_size)
+        q_size = _ceil_buy_size_for_amount_precision(q_price, q_size, price_step=tick)
     elif side_u == "SELL":
         q_price = _floor_to_step(price_d, tick)
         q_size = _floor_to_step(size_d, SIZE_STEP)
@@ -208,7 +208,7 @@ def canonical_buy_target_for_notional(
         )
 
     # Otherwise accept floor (undersize).
-    if floor_maker >= min_maker_amount and floor_size >= min_size:
+    if floor_maker >= min_maker_amount and floor_maker <= max_allowed_maker and floor_size >= min_size:
         return BuyCanonicalTarget(
             price=q_price,
             size=floor_size,
@@ -377,9 +377,23 @@ def _order_dict_from_body(body: bytes) -> dict[str, object]:
     return obj
 
 
+def _assert_serialized_decimal_places(raw: object, max_decimals: int, label: str) -> None:
+    try:
+        value = Decimal(str(raw))
+    except (InvalidOperation, ValueError, TypeError):
+        raise ValueError(f"signed_order_{label}_not_decimal value={raw!r}") from None
+    decimals = max(0, -value.as_tuple().exponent)
+    if decimals > max_decimals:
+        raise ValueError(
+            f"signed_order_{label}_too_many_decimals value={raw!r} max_decimals={max_decimals}"
+        )
+
+
 def _extract_amounts(order: dict[str, object]) -> tuple[Decimal, Decimal]:
     maker_raw = order.get("makerAmount", order.get("maker_amount"))
     taker_raw = order.get("takerAmount", order.get("taker_amount"))
+    _assert_serialized_decimal_places(maker_raw, 2, "maker_amount")
+    _assert_serialized_decimal_places(taker_raw, 4, "taker_amount")
     maker = _dec(maker_raw)
     taker = _dec(taker_raw)
     if maker <= 0 or taker <= 0:
@@ -410,6 +424,7 @@ async def prepare_template(
     side: str,
     price: float,
     size: float,
+    tick: Decimal = PRICE_TICK,
     owner: str,
     order_type: str,
     post_only: bool,
@@ -419,7 +434,7 @@ async def prepare_template(
         side=side_u,
         price=price,
         size=size,
-        tick=PRICE_TICK,
+        tick=tick,
     )
 
     order_args_cls = OrderArgsV2 if OrderArgsV2 is not None and _uses_v2_orders(clob) else OrderArgs
@@ -446,7 +461,7 @@ async def prepare_template(
     _assert_step_aligned(maker, MAKER_AMOUNT_STEP, "maker_amount")
     _assert_step_aligned(taker, TAKER_AMOUNT_STEP, "taker_amount")
     implied = _implied_price_from_amounts(side=side_u, maker=maker, taker=taker)
-    _assert_tick_aligned(implied, PRICE_TICK)
+    _assert_tick_aligned(implied, tick)
     if implied != price_d:
         raise ValueError(
             f"signed_order_price_mismatch side={side_u} input={price_d} implied={implied}"

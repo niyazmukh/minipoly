@@ -42,6 +42,7 @@ class ExitDecision:
     limit_price: Decimal = _DEC_ZERO
     bid: Decimal = _DEC_ZERO
     ask: Decimal = _DEC_ZERO
+    tick: Decimal = Decimal("0.01")
     order_type: str = "FAK"
     signal: str = "EXIT"
 
@@ -82,6 +83,7 @@ def sell_decision(
         limit_price=price_at_tick(quote.bid, quote.tick),
         bid=quote.bid,
         ask=quote.ask,
+        tick=quote.tick,
         order_type=cfg.order_type,
         signal=cfg.signal,
     )

@@ -357,6 +357,33 @@ def test_prepare_template_raises_on_price_mismatch() -> None:
 # ── BUY amount precision ──────────────────────────────────────────────────
 
 
+def test_prepare_template_uses_market_tick_instead_of_global_cent_tick() -> None:
+    """A sub-cent market tick must survive the final signing canonicalization."""
+
+    async def _run() -> None:
+        clob = _MockClobClient(maker_amount="10.01", taker_amount="910.0000")
+        template = await prepare_template(
+            clob,
+            name="entry-yes",
+            token_id="yes",
+            side="BUY",
+            price=Decimal("0.011"),
+            size=Decimal("910.0000"),
+            tick=Decimal("0.001"),
+            owner="owner",
+            order_type="FAK",
+            post_only=False,
+        )
+
+        assert template.price == Decimal("0.011")
+        assert template.size == Decimal("910.0000")
+        assert template.implied_price == Decimal("0.011")
+        assert clob._calls[0]["price"] == 0.011
+        assert clob._calls[0]["size"] == 910.0
+
+    asyncio.run(_run())
+
+
 def test_prepare_template_rejects_buy_body_with_maker_over_2dp() -> None:
     """BUY with maker=10.0032 (>2dp) must be rejected locally."""
 
@@ -364,7 +391,7 @@ def test_prepare_template_rejects_buy_body_with_maker_over_2dp() -> None:
         # implied price = 10.0032 / 20.84 ≈ 0.48 (tick-aligned)
         # but maker amount has 4dp, violating 2dp constraint
         clob = _MockClobClient(maker_amount="10.0032", taker_amount="20.84")
-        with pytest.raises(ValueError, match="signed_order_maker_amount_not_step_aligned"):
+        with pytest.raises(ValueError, match="signed_order_maker_amount_too_many_decimals"):
             await prepare_template(
                 clob,
                 name="entry-yes",
@@ -372,6 +399,27 @@ def test_prepare_template_rejects_buy_body_with_maker_over_2dp() -> None:
                 side="BUY",
                 price=0.48,
                 size=20.84,
+                owner="owner",
+                order_type="FAK",
+                post_only=False,
+            )
+
+    asyncio.run(_run())
+
+
+def test_prepare_template_rejects_buy_body_with_serialized_maker_over_2dp() -> None:
+    """BUY maker=1.020000 is numerically cent-aligned but serialized over 2dp."""
+
+    async def _run() -> None:
+        clob = _MockClobClient(maker_amount="1.020000", taker_amount="2.5500")
+        with pytest.raises(ValueError, match="signed_order_maker_amount_too_many_decimals"):
+            await prepare_template(
+                clob,
+                name="entry-no",
+                token_id="no",
+                side="BUY",
+                price=Decimal("0.40"),
+                size=Decimal("2.5500"),
                 owner="owner",
                 order_type="FAK",
                 post_only=False,
@@ -421,7 +469,7 @@ def test_prepare_template_rejects_buy_body_with_taker_over_4dp() -> None:
         # maker=0.01 (2dp-aligned), taker=0.015625 (5dp)
         # implied price = 0.01 / 0.015625 = 0.64 (tick-aligned)
         clob = _MockClobClient(maker_amount="0.01", taker_amount="0.015625")
-        with pytest.raises(ValueError, match="signed_order_taker_amount_not_step_aligned"):
+        with pytest.raises(ValueError, match="signed_order_taker_amount_too_many_decimals"):
             await prepare_template(
                 clob,
                 name="entry-yes",
@@ -429,6 +477,48 @@ def test_prepare_template_rejects_buy_body_with_taker_over_4dp() -> None:
                 side="BUY",
                 price=0.64,
                 size=0.015625,
+                owner="owner",
+                order_type="FAK",
+                post_only=False,
+            )
+
+    asyncio.run(_run())
+
+
+def test_prepare_template_rejects_buy_body_with_serialized_taker_over_4dp() -> None:
+    """BUY taker=2.550000 is numerically 4dp-aligned but serialized over 4dp."""
+
+    async def _run() -> None:
+        clob = _MockClobClient(maker_amount="1.02", taker_amount="2.550000")
+        with pytest.raises(ValueError, match="signed_order_taker_amount_too_many_decimals"):
+            await prepare_template(
+                clob,
+                name="entry-no",
+                token_id="no",
+                side="BUY",
+                price=Decimal("0.40"),
+                size=Decimal("2.5500"),
+                owner="owner",
+                order_type="FAK",
+                post_only=False,
+            )
+
+    asyncio.run(_run())
+
+
+def test_prepare_template_rejects_sell_body_with_serialized_amount_precision_escape() -> None:
+    """SELL must use the same serialized signed-body precision gate."""
+
+    async def _run() -> None:
+        clob = _MockClobClient(maker_amount="1.570000", taker_amount="1.130400")
+        with pytest.raises(ValueError, match="signed_order_maker_amount_too_many_decimals"):
+            await prepare_template(
+                clob,
+                name="exit-take_profit",
+                token_id="yes",
+                side="SELL",
+                price=Decimal("0.72"),
+                size=Decimal("1.57"),
                 owner="owner",
                 order_type="FAK",
                 post_only=False,
@@ -557,6 +647,21 @@ def test_canonical_buy_target_for_notional_rejects_when_no_valid_size() -> None:
             min_size=Decimal("0.01"),
             min_maker_amount=Decimal("1.01"),
             max_notional_overrun=Decimal("0.01"),
+        )
+
+
+def test_canonical_buy_target_for_notional_rejects_floor_above_zero_overrun_cap() -> None:
+    """Floor is still invalid when a fractional target allows no overrun."""
+    from fast_order_submitter import canonical_buy_target_for_notional
+    with pytest.raises(ValueError, match="no_valid_buy_size_within_notional_bounds"):
+        canonical_buy_target_for_notional(
+            price=Decimal("0.11"),
+            target_usdc=Decimal("10.009"),
+            tick=Decimal("0.01"),
+            min_size=Decimal("0.01"),
+            min_maker_amount=Decimal("1.01"),
+            max_notional_overrun=Decimal("0"),
+            max_notional_overrun_bps=0,
         )
 
 

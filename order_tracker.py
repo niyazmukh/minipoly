@@ -367,6 +367,47 @@ class LocalOrderTracker:
         self.pending_submits[pending.submit_id] = updated
         return updated
 
+    def record_local_matched_fill(
+        self,
+        *,
+        order_id: str,
+        asset_id: str,
+        side: str,
+        size: Decimal,
+        price: Decimal,
+        now_ts: float,
+    ) -> TradeState | None:
+        """Apply a submit response that already reports a MATCHED fill."""
+        oid = str(order_id or "").strip()
+        aid = str(asset_id or "").strip()
+        fill_side = str(side or "").upper().strip()
+        fill_size = _parse_dec(size)
+        fill_price = _parse_dec(price)
+        if not oid or not aid or fill_side not in {"BUY", "SELL"} or fill_size <= 0 or fill_price <= 0:
+            return None
+        trade_id = f"local:{oid}"
+        prev = self.trades.get(trade_id)
+        if prev is not None:
+            return prev
+        record = TradeState(
+            trade_id=trade_id,
+            taker_order_id=oid,
+            asset_id=aid,
+            side=fill_side,
+            size=fill_size,
+            price=fill_price,
+            status="MATCHED",
+            applied=False,
+            finalized=False,
+            updated_ts=float(now_ts),
+        )
+        self._apply_trade(record, reverse=False)
+        record = dataclasses.replace(record, applied=True)
+        self.trades[trade_id] = record
+        if fill_side == "SELL":
+            self._reduce_sell_reservation(oid, fill_size)
+        return record
+
     def expire_unknown_submits(self, *, now_ts: float, max_age_s: float) -> list[str]:
         """Age UNKNOWN submits out of the active-unconfirmed set.
 
@@ -674,6 +715,8 @@ class LocalOrderTracker:
             finalized=(prev.finalized if prev is not None else False),
             updated_ts=updated_ts,
         )
+        if prev is None and self._matches_applied_local_trade(record):
+            record = dataclasses.replace(record, applied=True)
 
         if status == "MATCHED" and not record.applied:
             self._apply_trade(record, reverse=False)
@@ -705,6 +748,19 @@ class LocalOrderTracker:
                 f"asset={record.asset_id or '?'} size={record.size} price={record.price} owned={owned} sellable={sellable}"
             )
         return record
+
+    def _matches_applied_local_trade(self, record: TradeState) -> bool:
+        if not record.taker_order_id:
+            return False
+        local = self.trades.get(f"local:{record.taker_order_id}")
+        if local is None or not local.applied:
+            return False
+        return (
+            local.asset_id == record.asset_id
+            and local.side == record.side
+            and local.size == record.size
+            and local.price == record.price
+        )
 
     def _delta_for_trade(self, record: TradeState) -> Decimal:
         if record.size <= 0:

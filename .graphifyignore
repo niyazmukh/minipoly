@@ -28,5 +28,10 @@ __pycache__/
 # Pytest cache
 .pytest_cache/
 
-# Shell scripts (not Python code corpus)
+# Non-runtime corpus files
+docs/
+*.md
+*.txt
 *.sh
+requirements.txt
+AGENTS.md

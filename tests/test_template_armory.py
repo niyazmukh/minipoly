@@ -17,12 +17,16 @@ class _Engine:
     def __init__(self) -> None:
         self.armed: list[tuple[str, FastOrderTemplate, HotPathGuard]] = []
         self.quotes: list[tuple[str, Decimal, Decimal, int]] = []
+        self.disarmed: list[str] = []
 
     def arm(self, signal: str, template: FastOrderTemplate, guard: HotPathGuard) -> None:
         self.armed.append((signal, template, guard))
 
     def update_quote(self, token_id: str, *, bid: Decimal, ask: Decimal, ts_ns: int | None = None) -> None:
         self.quotes.append((token_id, bid, ask, int(ts_ns or 0)))
+
+    def disarm(self, signal: str) -> None:
+        self.disarmed.append(signal)
 
 
 class _Builder:
@@ -38,6 +42,22 @@ class _Builder:
             price=Decimal(str(kwargs["price"])),
             size=Decimal(str(kwargs["size"])),
             body_bytes=f"{kwargs['name']}:{kwargs['price']}:{kwargs['size']}".encode("ascii"),
+        )
+
+
+class _DivergingBuilder:
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+
+    async def __call__(self, **kwargs) -> FastOrderTemplate:
+        self.calls.append(dict(kwargs))
+        return FastOrderTemplate(
+            name=kwargs["name"],
+            token_id=kwargs["token_id"],
+            side=kwargs["side"],
+            price=Decimal("0.02"),
+            size=Decimal(str(kwargs["size"])),
+            body_bytes=b"diverged",
         )
 
 
@@ -73,7 +93,7 @@ def test_quote_update_prepares_and_arms_template() -> None:
     assert builder.calls[0]["size"] == Decimal("18.0000")
     assert engine.armed[0][0] == "YES"
     assert engine.armed[0][1].token_id == "yes-token"
-    assert engine.armed[0][2].max_ask == Decimal("0.521")
+    assert engine.armed[0][2].max_ask == Decimal("0")
     assert engine.quotes == [("yes-token", Decimal("0.50"), Decimal("0.521"), 1_000_000)]
 
 
@@ -200,6 +220,35 @@ def test_unfillable_one_dollar_price_does_not_start_signing() -> None:
     assert engine.armed == []
 
 
+def test_armory_does_not_arm_when_signed_template_diverges_from_target() -> None:
+    async def _run() -> None:
+        engine = _Engine()
+        builder = _DivergingBuilder()
+        armory = TemplateArmory(
+            cfg=ArmoryConfig(usdc_per_trade=Decimal("10"), entry_slippage=Decimal("0")),
+            engine=engine,
+            build_template=builder,
+            now_ns=lambda: 1,
+        )
+
+        changed = await armory.on_quote(
+            signal="YES",
+            token_id="yes",
+            bid=Decimal("0.010"),
+            ask=Decimal("0.011"),
+            tick=Decimal("0.001"),
+        )
+        for _ in range(5):
+            await asyncio.sleep(0)
+
+        assert changed is True
+        assert len(builder.calls) == 1
+        assert builder.calls[0]["price"] == Decimal("0.011")
+        assert engine.armed == []
+
+    asyncio.run(_run())
+
+
 def test_configured_buy_limit_bounds_skip_out_of_band_quotes() -> None:
     engine = _Engine()
     builder = _Builder()
@@ -236,6 +285,46 @@ def test_configured_buy_limit_bounds_skip_out_of_band_quotes() -> None:
     assert high is False
     assert builder.calls == []
     assert engine.armed == []
+
+
+def test_guard_uses_executable_buy_limit_not_raw_quote_ask() -> None:
+    engine = _Engine()
+    builder = _Builder()
+    armory = TemplateArmory(
+        cfg=ArmoryConfig(
+            usdc_per_trade=Decimal("10"),
+            reprice_hysteresis_pct=Decimal("0.05"),
+        ),
+        engine=engine,
+        build_template=builder,
+        now_ns=lambda: 1_000_000,
+    )
+
+    first = asyncio.run(
+        armory.on_quote(
+            signal="YES",
+            token_id="yes",
+            bid=Decimal("0.47"),
+            ask=Decimal("0.481"),
+            tick=Decimal("0.01"),
+        )
+    )
+    second = asyncio.run(
+        armory.on_quote(
+            signal="YES",
+            token_id="yes",
+            bid=Decimal("0.48"),
+            ask=Decimal("0.489"),
+            tick=Decimal("0.01"),
+        )
+    )
+
+    assert first is True
+    assert second is False
+    assert len(builder.calls) == 1
+    assert engine.armed[0][1].price == Decimal("0.49")
+    assert engine.armed[0][2].max_ask == Decimal("0")
+    assert engine.disarmed == []
 
 
 def test_signing_failure_is_swallowed_so_next_quote_can_retry() -> None:

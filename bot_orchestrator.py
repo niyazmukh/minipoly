@@ -334,18 +334,25 @@ class MinimalBotOrchestrator:
         # Iterate ALL positions — not just state.position. Each position is
         # evaluated independently so position B doesn't wait behind position A.
         owned_map = getattr(self._tracker, "owned_by_asset", {})
-        if not owned_map:
+        active_assets = {market.yes_token_id, market.no_token_id} if market is not None else set()
+        candidate_assets = [
+            asset_id
+            for asset_id in list(owned_map.keys())
+            if not active_assets or asset_id in active_assets
+        ]
+        if not candidate_assets:
             if self._tracker.has_unconfirmed_submits(intent="entry"):
                 self._maybe_log_exit_diag("no_owned_assets_after_entry_submit")
             return ExitDecision("HOLD", "no_sellable_position")
-        for asset_id in list(owned_map.keys()):
-            sellable_size = self._tracker.sellable(asset_id)
-            if sellable_size <= 0:
-                self._maybe_log_exit_diag("no_sellable_inventory", asset_id=asset_id, sellable=sellable_size)
-                continue
+        for asset_id in candidate_assets:
             owned, entry = self._tracker.position_size_and_entry(asset_id)
             if owned <= 0 or entry <= 0:
-                self._maybe_log_exit_diag("invalid_position_basis", asset_id=asset_id, owned=owned, sellable=sellable_size)
+                # Keep subquantum residue in tracker accounting, but do not
+                # let it consume exit diagnostics or block current inventory.
+                continue
+            sellable_size = self._tracker.sellable(asset_id)
+            if sellable_size <= 0:
+                self._maybe_log_exit_diag("no_sellable_inventory", asset_id=asset_id, owned=owned, sellable=sellable_size)
                 continue
             side = self.state.side_for_token(asset_id)
             if not side:

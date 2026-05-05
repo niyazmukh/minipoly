@@ -109,6 +109,41 @@ def test_exit_armory_arms_sell_template_with_bid_guard_and_fresh_quote() -> None
     assert engine.quotes[-1] == ("yes", Decimal("0.56"), Decimal("0.57"), 2_000)
 
 
+def test_exit_armory_passes_market_tick_to_sell_template_builder() -> None:
+    calls = []
+
+    async def _tracked_build_template(**kwargs) -> FastOrderTemplate:
+        calls.append(dict(kwargs))
+        return await _build_template(**kwargs)
+
+    armory = ExitArmory(
+        engine=_Engine(),
+        build_template=_tracked_build_template,
+        owner="owner",
+        max_quote_age_ns=100_000_000,
+    )
+    decision = ExitDecision(
+        action="SELL",
+        reason="take_profit",
+        side="YES",
+        token_id="yes",
+        size=Decimal("7.5"),
+        limit_price=Decimal("0.555"),
+        bid=Decimal("0.555"),
+        ask=Decimal("0.556"),
+        tick=Decimal("0.001"),
+        order_type="FAK",
+        signal="EXIT",
+    )
+
+    async def _run() -> None:
+        assert armory.prepare_exit(decision, quote_ts_ns=1_000) is True
+        await asyncio.sleep(0)
+
+    asyncio.run(_run())
+    assert calls[0]["tick"] == Decimal("0.001")
+
+
 def test_arm_exit_awaits_inflight_prepare_and_returns_true_without_waiting_for_periodic_loop() -> None:
     """arm_exit must arm and return True on the same call that triggers preparation,
     not silently return False and defer to the next periodic loop iteration."""

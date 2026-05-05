@@ -135,6 +135,7 @@ class ExitArmory:
                         side="SELL",
                         price=decision.limit_price,
                         size=decision.size,
+                        tick=decision.tick,
                         owner=self._owner,
                         order_type=decision.order_type,
                         post_only=False,
@@ -187,5 +188,6 @@ def _same_exit(left: ExitDecision, right: ExitDecision) -> bool:
         and left.side == right.side
         and left.size == right.size
         and left.limit_price == right.limit_price
+        and left.tick == right.tick
         and left.order_type == right.order_type
     )
