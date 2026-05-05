@@ -2,6 +2,7 @@ import asyncio
 import base64
 import hashlib
 import hmac
+import math
 import time
 from dataclasses import dataclass
 from decimal import Decimal, ROUND_CEILING, ROUND_DOWN, InvalidOperation
@@ -34,6 +35,8 @@ _ORDER_POST_TIMEOUT = aiohttp.ClientTimeout(
 
 PRICE_TICK = Decimal("0.01")
 SIZE_STEP = Decimal("0.01")
+MAKER_AMOUNT_STEP = Decimal("0.01")
+TAKER_AMOUNT_STEP = Decimal("0.0001")
 
 
 def _dec(value) -> Decimal:
@@ -64,17 +67,58 @@ def _canonical_order_params(*, side: str, price, size, tick: Decimal = PRICE_TIC
 
     if side_u == "BUY":
         q_price = _ceil_to_step(price_d, tick)
+        q_size = _floor_to_step(size_d, TAKER_AMOUNT_STEP)
+        q_size = _ceil_buy_size_for_amount_precision(q_price, q_size)
     elif side_u == "SELL":
         q_price = _floor_to_step(price_d, tick)
+        q_size = _floor_to_step(size_d, SIZE_STEP)
     else:
         raise ValueError(f"invalid order side: {side!r}")
-
-    q_size = _floor_to_step(size_d, SIZE_STEP)
 
     if q_price <= 0 or q_size <= 0:
         raise ValueError(f"invalid canonical order params side={side_u} price={q_price} size={q_size}")
 
     return q_price, q_size
+
+
+def _assert_step_aligned(value: Decimal, step: Decimal, label: str) -> None:
+    aligned = _floor_to_step(value, step)
+    if value != aligned:
+        raise ValueError(
+            f"signed_order_{label}_not_step_aligned value={value} step={step}"
+        )
+
+
+def _ceil_buy_size_for_amount_precision(
+    price: Decimal,
+    size: Decimal,
+    *,
+    price_step: Decimal = PRICE_TICK,
+    maker_step: Decimal = MAKER_AMOUNT_STEP,
+    taker_step: Decimal = TAKER_AMOUNT_STEP,
+) -> Decimal:
+    """Return the smallest size >= *size* such that price × size is
+    aligned to *maker_step*, assuming price is aligned to *price_step*
+    and size is aligned to *taker_step*.
+    """
+    price_units = int(price / price_step)
+    taker_scale = int(Decimal("1") / taker_step)
+    price_scale = int(Decimal("1") / price_step)
+    maker_scale = int(Decimal("1") / maker_step)
+
+    # price * size = (price_units/price_scale) * (taker_units/taker_scale)
+    # For this to be aligned to maker_step = 1/maker_scale:
+    #   price_units * taker_units * maker_scale  must be divisible by
+    #   price_scale * taker_scale
+    denominator = (price_scale * taker_scale) // maker_scale
+    required_multiple = denominator // math.gcd(price_units, denominator)
+
+    taker_units = int(size * taker_scale)
+    remainder = taker_units % required_multiple
+    if remainder > 0:
+        taker_units += required_multiple - remainder
+
+    return Decimal(taker_units) / Decimal(taker_scale)
 
 
 # DUPLICATED: also in order_placer.py:56.  Consolidate if either file is refactored.
@@ -294,6 +338,8 @@ async def prepare_template(
 
     order = _order_dict_from_body(body)
     maker, taker = _extract_amounts(order)
+    _assert_step_aligned(maker, MAKER_AMOUNT_STEP, "maker_amount")
+    _assert_step_aligned(taker, TAKER_AMOUNT_STEP, "taker_amount")
     implied = _implied_price_from_amounts(side=side_u, maker=maker, taker=taker)
     _assert_tick_aligned(implied, PRICE_TICK)
     if implied != price_d:

@@ -17,6 +17,8 @@ from fast_order_submitter import (
     HeaderSigner,
     PRICE_TICK,
     _assert_tick_aligned,
+    _ceil_buy_size_for_amount_precision,
+    _canonical_order_params,
     _floor_to_step,
     build_order_body,
     extract_order_id,
@@ -347,3 +349,89 @@ def test_prepare_template_raises_on_price_mismatch() -> None:
             )
 
     asyncio.run(_run())
+
+
+# ── BUY amount precision ──────────────────────────────────────────────────
+
+
+def test_prepare_template_rejects_buy_body_with_maker_over_2dp() -> None:
+    """BUY with maker=10.0032 (>2dp) must be rejected locally."""
+
+    async def _run() -> None:
+        # implied price = 10.0032 / 20.84 ≈ 0.48 (tick-aligned)
+        # but maker amount has 4dp, violating 2dp constraint
+        clob = _MockClobClient(maker_amount="10.0032", taker_amount="20.84")
+        with pytest.raises(ValueError, match="signed_order_maker_amount_not_step_aligned"):
+            await prepare_template(
+                clob,
+                name="entry-yes",
+                token_id="yes",
+                side="BUY",
+                price=0.48,
+                size=20.84,
+                owner="owner",
+                order_type="FAK",
+                post_only=False,
+            )
+
+    asyncio.run(_run())
+
+
+@pytest.mark.parametrize(
+    "price,maker,taker",
+    [
+        ("0.48", "9.99", "20.8125"),
+        ("0.51", "9.69", "19.0000"),
+        ("0.50", "10.00", "20.0000"),
+    ],
+)
+def test_valid_buy_bodies_pass(price: str, maker: str, taker: str) -> None:
+    async def _run() -> None:
+        clob = _MockClobClient(maker_amount=maker, taker_amount=taker)
+        template = await prepare_template(
+            clob,
+            name="entry-yes",
+            token_id="yes",
+            side="BUY",
+            price=float(price),
+            size=float(taker),
+            owner="owner",
+            order_type="FAK",
+            post_only=False,
+        )
+        assert template.implied_price == template.price
+        assert template.implied_price == _floor_to_step(template.implied_price, Decimal("0.01"))
+        # maker amount must be step-aligned
+        maker_d = Decimal(maker)
+        assert _floor_to_step(maker_d, Decimal("0.01")) == maker_d
+        # taker amount must be step-aligned
+        taker_d = Decimal(taker)
+        assert _floor_to_step(taker_d, Decimal("0.0001")) == taker_d
+
+    asyncio.run(_run())
+
+
+def test_canonical_buy_size_is_amount_precision_aligned() -> None:
+    """Property: for BUY, canonical size*price always has ≤2dp."""
+    from fast_order_submitter import _canonical_order_params, _ceil_buy_size_for_amount_precision
+
+    prices = [Decimal(p) / Decimal("100") for p in range(1, 100)]
+    for price_d in prices:
+        # simulate template_armory: 1.01 USDC / buy_limit
+        target_size = _floor_to_step(Decimal("1.01") / price_d, Decimal("0.0001"))
+        try:
+            q_price, q_size = _canonical_order_params(
+                side="BUY", price=price_d, size=target_size
+            )
+        except ValueError:
+            continue
+        maker = q_price * q_size
+        assert _floor_to_step(maker, Decimal("0.01")) == maker, (
+            f"BUY price={price_d} size={q_size} maker={maker} not 2dp-aligned"
+        )
+        assert q_size == _floor_to_step(q_size, Decimal("0.0001")), (
+            f"BUY size={q_size} not 4dp-aligned"
+        )
+        assert q_price == _floor_to_step(q_price, Decimal("0.01")), (
+            f"BUY price={q_price} not tick-aligned"
+        )

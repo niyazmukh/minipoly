@@ -193,9 +193,9 @@ class TemplateArmory:
                     max_age_ns=self._cfg.max_quote_age_ns,
                 )
                 self._armed[key] = _ArmedState(
-                    token_id=target.token_id,
-                    buy_limit=target.buy_limit,
-                    size=target.size,
+                    token_id=template.token_id,
+                    buy_limit=template.price,
+                    size=template.size,
                     tick=target.tick,
                 )
                 self._engine.arm(key, template, guard)
