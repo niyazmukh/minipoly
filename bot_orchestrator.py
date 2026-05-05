@@ -90,6 +90,7 @@ class MinimalBotOrchestrator:
         "_anchor_buffer",
         "_pending_anchor_slug_ts",
         "_exit_balance_cooldown",
+        "_last_exit_diag_ns",
     )
 
     def __init__(
@@ -120,6 +121,7 @@ class MinimalBotOrchestrator:
         self._anchor_buffer: deque[tuple[int, float]] = deque()
         self._pending_anchor_slug_ts: int = 0
         self._exit_balance_cooldown: dict[str, float] = {}
+        self._last_exit_diag_ns = 0
 
     def configure_exit_policy(
         self,
@@ -293,6 +295,32 @@ class MinimalBotOrchestrator:
         self._hot_path.disarm("YES")
         self._hot_path.disarm("NO")
 
+    def _maybe_log_exit_diag(
+        self,
+        reason: str,
+        *,
+        asset_id: str = "",
+        owned: Decimal = Decimal("0"),
+        sellable: Decimal = Decimal("0"),
+        bid: Decimal = Decimal("0"),
+        ask: Decimal = Decimal("0"),
+        quote_age_us: int = -1,
+    ) -> None:
+        now_ns = self.state.now_ns()
+        if now_ns - self._last_exit_diag_ns < 5_000_000_000:
+            return
+        self._last_exit_diag_ns = now_ns
+        _LOG.warning(
+            "exit_diag reason=%s asset=%s owned=%s sellable=%s bid=%s ask=%s quote_age_us=%s",
+            reason,
+            asset_id,
+            owned,
+            sellable,
+            bid,
+            ask,
+            quote_age_us,
+        )
+
     async def evaluate_exit(self) -> ExitDecision:
         if self._exit_cfg is None or self._exit_armory is None or self._tracker is None:
             return ExitDecision("HOLD", "exit_policy_unconfigured")
@@ -305,18 +333,25 @@ class MinimalBotOrchestrator:
         now_ns = self.state.now_ns()
         # Iterate ALL positions — not just state.position. Each position is
         # evaluated independently so position B doesn't wait behind position A.
-        for asset_id in list(getattr(self._tracker, "owned_by_asset", {}).keys()):
+        owned_map = getattr(self._tracker, "owned_by_asset", {})
+        if not owned_map:
+            self._maybe_log_exit_diag("no_owned_assets")
+        for asset_id in list(owned_map.keys()):
             sellable_size = self._tracker.sellable(asset_id)
             if sellable_size <= 0:
+                self._maybe_log_exit_diag("no_sellable_inventory", asset_id=asset_id, sellable=sellable_size)
                 continue
             owned, entry = self._tracker.position_size_and_entry(asset_id)
             if owned <= 0 or entry <= 0:
+                self._maybe_log_exit_diag("invalid_position_basis", asset_id=asset_id, owned=owned, sellable=sellable_size)
                 continue
             side = self.state.side_for_token(asset_id)
             if not side:
+                self._maybe_log_exit_diag("asset_outside_active_market", asset_id=asset_id, owned=owned, sellable=sellable_size)
                 continue
             quote = self.state.quotes.get(asset_id)
             if quote is None:
+                self._maybe_log_exit_diag("quote_missing", asset_id=asset_id, owned=owned, sellable=sellable_size)
                 continue
             # Skip assets that recently got "not enough balance" from the venue.
             # Polymarket confirms trades before tokens settle in the wallet;
@@ -340,6 +375,15 @@ class MinimalBotOrchestrator:
                 sellable_size=sellable_size,
             )
             if decision.action != "SELL":
+                self._maybe_log_exit_diag(
+                    decision.reason,
+                    asset_id=asset_id,
+                    owned=owned,
+                    sellable=sellable_size,
+                    bid=quote.bid,
+                    ask=quote.ask,
+                    quote_age_us=self.state.quote_age_us(asset_id),
+                )
                 continue
             armed = await self._exit_armory.arm_exit(decision, quote_ts_ns=quote.ts_ns)
             if armed:

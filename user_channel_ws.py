@@ -1,6 +1,8 @@
 import asyncio
+import logging
 import os
 import re
+from contextlib import suppress
 from pathlib import Path
 from typing import Any, Callable
 
@@ -15,6 +17,16 @@ from py_clob_client.client import ClobClient
 WS_USER_URL = "wss://ws-subscriptions-clob.polymarket.com/ws/user"
 SCRIPT_ENV_FILE = Path(__file__).resolve().parent / ".env.poly"
 EventCallback = Callable[[dict[str, Any]], object]
+
+APP_PING_INTERVAL_S = 10.0
+_LOG = logging.getLogger(__name__)
+
+
+def _redact_api_key(api_key: str) -> str:
+    key = str(api_key or "")
+    if len(key) <= 10:
+        return "<set>" if key else "<missing>"
+    return f"{key[:6]}...{key[-4:]}"
 
 
 def _safe_print(line: str) -> None:
@@ -44,8 +56,15 @@ async def _dispatch_user_event(ev: dict[str, Any], on_event: EventCallback | Non
 
 
 def _emit_status(line: str, *, on_event: EventCallback | None = None) -> None:
+    _LOG.warning("user_ws_status %s", line)
     if on_event is None:
         _safe_print(line)
+
+
+async def _app_ping_loop(ws) -> None:
+    while True:
+        await asyncio.sleep(APP_PING_INTERVAL_S)
+        await ws.send("PING")
 
 
 async def _resolve_api_creds() -> tuple[str, str, str]:
@@ -99,20 +118,28 @@ async def _resolve_api_creds() -> tuple[str, str, str]:
     return str(creds.api_key), str(creds.api_secret), str(creds.api_passphrase)
 
 
-async def listen_forever(*, on_event: EventCallback | None = None) -> None:
+async def listen_forever(
+    *,
+    on_event: EventCallback | None = None,
+    api_key: str = "",
+    api_secret: str = "",
+    api_passphrase: str = "",
+) -> None:
     load_dotenv(SCRIPT_ENV_FILE, override=True)
 
-    api_key, api_secret, api_passphrase = await _resolve_api_creds()
+    if not (api_key and api_secret and api_passphrase):
+        api_key, api_secret, api_passphrase = await _resolve_api_creds()
     ws_url = os.getenv("POLY_WS_USER", WS_USER_URL).strip() or WS_USER_URL
 
     backoff = 0.25
     while True:
         try:
+            api_key_label = _redact_api_key(api_key)
+            _LOG.warning("user_ws_connecting url=%s api_key=%s", ws_url, api_key_label)
+
             async with websockets.connect(
                 ws_url,
-                # Use protocol-level ping/pong. Do not send app-level heartbeat payloads.
-                ping_interval=20,
-                ping_timeout=10,
+                ping_interval=None,
                 compression=None,
                 open_timeout=5,
                 close_timeout=2,
@@ -127,27 +154,36 @@ async def listen_forever(*, on_event: EventCallback | None = None) -> None:
                     "type": "user",
                 }
                 await ws.send(orjson.dumps(auth_msg).decode("utf-8"))
+                _LOG.warning("user_ws_connected url=%s api_key=%s", ws_url, api_key_label)
+                _LOG.warning("user_ws_auth_sent type=user api_key=%s", api_key_label)
                 _emit_status("user channel subscribed", on_event=on_event)
 
                 backoff = 0.25
-                while True:
-                    raw = await ws.recv()
-                    msg = raw
-                    if isinstance(raw, bytes):
-                        msg = raw.decode("utf-8", errors="ignore")
-                    if isinstance(msg, str):
-                        msg = msg.strip()
-                    if msg in ("PONG", "pong", "PING", "ping", ""):
-                        continue
-                    try:
-                        payload = orjson.loads(msg) if isinstance(msg, (str, bytes)) else msg
-                    except orjson.JSONDecodeError:
-                        # Ignore control/non-JSON frames without dropping connection.
-                        continue
-                    for ev in _to_events(payload):
-                        et = str(ev.get("event_type") or ev.get("eventType") or ev.get("type") or "").lower()
-                        if et in {"order", "trade"}:
-                            await _dispatch_user_event(ev, on_event)
+                ping_task = asyncio.create_task(_app_ping_loop(ws), name="user-ws-app-ping")
+                try:
+                    while True:
+                        raw = await ws.recv()
+                        msg = raw
+                        if isinstance(raw, bytes):
+                            msg = raw.decode("utf-8", errors="ignore")
+                        if isinstance(msg, str):
+                            msg = msg.strip()
+                        if msg in ("PONG", "pong", "PING", "ping", ""):
+                            continue
+                        try:
+                            payload = orjson.loads(msg) if isinstance(msg, (str, bytes)) else msg
+                        except orjson.JSONDecodeError:
+                            continue
+                        for ev in _to_events(payload):
+                            et = str(ev.get("event_type") or ev.get("eventType") or ev.get("type") or "").lower()
+                            if et in {"order", "trade"}:
+                                await _dispatch_user_event(ev, on_event)
+                            else:
+                                _LOG.warning("user_ws_control_payload event_type=%s", et or "<missing>")
+                finally:
+                    ping_task.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await ping_task
         except asyncio.CancelledError:
             raise
         except Exception as exc:

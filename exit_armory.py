@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any, Awaitable, Callable, Protocol
@@ -8,6 +9,8 @@ from typing import Any, Awaitable, Callable, Protocol
 from exit_policy import ExitDecision
 from fast_order_submitter import FastOrderTemplate
 from hot_path_engine import HotPathGuard
+
+_LOG = logging.getLogger(__name__)
 
 
 class _Engine(Protocol):
@@ -70,10 +73,22 @@ class ExitArmory:
             if task is not None and not task.done():
                 try:
                     await task
-                except Exception:
-                    pass
+                except Exception as exc:
+                    _LOG.warning(
+                        "exit_armory_prepare_failed token_id=%s reason=%s error=%r",
+                        decision.token_id,
+                        decision.reason,
+                        exc,
+                    )
             prepared = self._prepared
             if prepared is None or not _same_exit(prepared.decision, decision):
+                _LOG.warning(
+                    "exit_armory_not_armed token_id=%s reason=%s size=%s limit=%s",
+                    decision.token_id,
+                    decision.reason,
+                    decision.size,
+                    decision.limit_price,
+                )
                 return False
         self._arm_prepared(prepared, quote_ts_ns=quote_ts_ns, quote_decision=decision)
         return True
@@ -130,6 +145,9 @@ class ExitArmory:
                 self._prepared = prepared
                 self._arm_prepared(prepared, quote_ts_ns=quote_ts_ns, quote_decision=decision)
         except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            _LOG.warning("exit_armory_prepare_loop_failed error=%r", exc)
             raise
         finally:
             if self._task is asyncio.current_task():

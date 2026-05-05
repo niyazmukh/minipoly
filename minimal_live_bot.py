@@ -58,6 +58,9 @@ class LiveBot:
     http: CLOBHttpClient
     session: aiohttp.ClientSession
     submitter: FastOrderSubmitter
+    api_key: str
+    api_secret: str
+    api_passphrase: str
     basis_path: Path | None = None
 
     async def close(self) -> None:
@@ -321,6 +324,9 @@ async def build_live_bot() -> LiveBot:
         http=http,
         session=session,
         submitter=submitter,
+        api_key=api_key,
+        api_secret=api_secret,
+        api_passphrase=api_passphrase,
         basis_path=basis_path,
     )
 
@@ -580,7 +586,12 @@ async def run_live() -> None:
         await run_supervised(
             bot.runtime,
             market_listener=lambda cb: market_ws.listen_forever(bot.market_cfg, bot.http, on_event=cb),
-            user_listener=lambda cb: user_channel_ws.listen_forever(on_event=cb),
+            user_listener=lambda cb: user_channel_ws.listen_forever(
+                on_event=cb,
+                api_key=bot.api_key,
+                api_secret=bot.api_secret,
+                api_passphrase=bot.api_passphrase,
+            ),
             binance_listener=lambda cb: binance_sbe_listener.listen_forever(bcfg, bspec, on_tick_fields=cb),
             exit_interval_s=_float_env("MINIMAL_EXIT_INTERVAL_S", 0.05),
             cancel_submitter=bot.submitter,

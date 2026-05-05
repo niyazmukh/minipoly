@@ -630,7 +630,18 @@ class LocalOrderTracker:
 
         prev = self.trades.get(trade_id)
         taker_order_id = str(msg.get("taker_order_id") or (prev.taker_order_id if prev else "")).strip()
-        if self._current_run_only and prev is None and not self._trade_belongs_to_current_run(taker_order_id, msg):
+
+        matched_submit_id = ""
+        if prev is None:
+            matched_submit_id = self._match_submit_from_trade_msg(taker_order_id, msg)
+            if matched_submit_id and taker_order_id:
+                self.confirm_submit_order_id(
+                    matched_submit_id,
+                    taker_order_id,
+                    now_ts=_event_ts(msg),
+                )
+
+        if self._current_run_only and prev is None and not matched_submit_id and not self._trade_belongs_to_current_run(taker_order_id, msg):
             return None
         status = _norm_status(msg.get("status")) or _norm_status(msg.get("type"))
         prev_status = prev.status if prev is not None else ""
@@ -769,6 +780,18 @@ class LocalOrderTracker:
 
         price = _parse_dec(msg.get("price"))
         return self._best_pending_candidate(order.asset_id, order.side, order.original_size, price)
+
+    def _match_submit_from_trade_msg(self, taker_order_id: str, msg: dict[str, Any]) -> str:
+        if taker_order_id and taker_order_id in self._order_to_submit:
+            return self._order_to_submit[taker_order_id]
+
+        asset_id = str(msg.get("asset_id") or "").strip()
+        side = str(msg.get("side") or "").upper().strip()
+        size = _parse_dec(msg.get("size"))
+        price = _parse_dec(msg.get("price"))
+        if not asset_id or not side:
+            return ""
+        return self._best_pending_candidate(asset_id, side, size, price)
 
     def _best_pending_candidate(
         self,
