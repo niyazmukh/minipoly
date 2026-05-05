@@ -335,7 +335,9 @@ class MinimalBotOrchestrator:
         # evaluated independently so position B doesn't wait behind position A.
         owned_map = getattr(self._tracker, "owned_by_asset", {})
         if not owned_map:
-            self._maybe_log_exit_diag("no_owned_assets")
+            if self._tracker.has_unconfirmed_submits(intent="entry"):
+                self._maybe_log_exit_diag("no_owned_assets_after_entry_submit")
+            return ExitDecision("HOLD", "no_sellable_position")
         for asset_id in list(owned_map.keys()):
             sellable_size = self._tracker.sellable(asset_id)
             if sellable_size <= 0:

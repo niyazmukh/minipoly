@@ -70,25 +70,22 @@ class ExitArmory:
             # submits immediately after signing rather than waiting for the
             # next periodic exit-loop iteration.
             task = self._task
+            prepare_failed = False
             if task is not None and not task.done():
                 try:
                     await task
-                except Exception as exc:
-                    _LOG.warning(
-                        "exit_armory_prepare_failed token_id=%s reason=%s error=%r",
-                        decision.token_id,
-                        decision.reason,
-                        exc,
-                    )
+                except Exception:
+                    prepare_failed = True
             prepared = self._prepared
             if prepared is None or not _same_exit(prepared.decision, decision):
-                _LOG.warning(
-                    "exit_armory_not_armed token_id=%s reason=%s size=%s limit=%s",
-                    decision.token_id,
-                    decision.reason,
-                    decision.size,
-                    decision.limit_price,
-                )
+                if not prepare_failed:
+                    _LOG.warning(
+                        "exit_armory_not_armed token_id=%s reason=%s size=%s limit=%s",
+                        decision.token_id,
+                        decision.reason,
+                        decision.size,
+                        decision.limit_price,
+                    )
                 return False
         self._arm_prepared(prepared, quote_ts_ns=quote_ts_ns, quote_decision=decision)
         return True
@@ -131,23 +128,29 @@ class ExitArmory:
             while self._pending is not None:
                 decision, quote_ts_ns = self._pending
                 self._pending = None
-                template = await self._build_template(
-                    name=f"exit-{decision.reason}",
-                    token_id=decision.token_id,
-                    side="SELL",
-                    price=round(float(decision.limit_price), 2),
-                    size=float(decision.size),
-                    owner=self._owner,
-                    order_type=decision.order_type,
-                    post_only=False,
-                )
+                try:
+                    template = await self._build_template(
+                        name=f"exit-{decision.reason}",
+                        token_id=decision.token_id,
+                        side="SELL",
+                        price=round(float(decision.limit_price), 2),
+                        size=float(decision.size),
+                        owner=self._owner,
+                        order_type=decision.order_type,
+                        post_only=False,
+                    )
+                except Exception as exc:
+                    _LOG.warning(
+                        "exit_armory_prepare_failed token_id=%s reason=%s error=%r",
+                        decision.token_id,
+                        decision.reason,
+                        exc,
+                    )
+                    raise
                 prepared = _PreparedExit(decision=decision, template=template)
                 self._prepared = prepared
                 self._arm_prepared(prepared, quote_ts_ns=quote_ts_ns, quote_decision=decision)
         except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            _LOG.warning("exit_armory_prepare_loop_failed error=%r", exc)
             raise
         finally:
             if self._task is asyncio.current_task():

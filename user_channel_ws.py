@@ -145,6 +145,7 @@ async def listen_forever(
                 close_timeout=2,
                 max_queue=8192,
             ) as ws:
+                _LOG.warning("user_ws_connected url=%s api_key=%s", ws_url, api_key_label)
                 auth_msg = {
                     "auth": {
                         "apiKey": api_key,
@@ -154,7 +155,6 @@ async def listen_forever(
                     "type": "user",
                 }
                 await ws.send(orjson.dumps(auth_msg).decode("utf-8"))
-                _LOG.warning("user_ws_connected url=%s api_key=%s", ws_url, api_key_label)
                 _LOG.warning("user_ws_auth_sent type=user api_key=%s", api_key_label)
                 _emit_status("user channel subscribed", on_event=on_event)
 
@@ -187,6 +187,7 @@ async def listen_forever(
         except asyncio.CancelledError:
             raise
         except Exception as exc:
+            _LOG.exception("user_ws_disconnected reconnecting_in=%.2fs", backoff)
             _safe_print(f"user ws disconnected: {exc!r}; reconnecting in {backoff:.2f}s")
             await asyncio.sleep(backoff)
             backoff = min(5.0, backoff * 1.7)
