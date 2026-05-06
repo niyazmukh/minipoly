@@ -93,7 +93,6 @@ def test_quote_update_prepares_and_arms_template() -> None:
     assert builder.calls[0]["size"] == Decimal("18.0000")
     assert engine.armed[0][0] == "YES"
     assert engine.armed[0][1].token_id == "yes-token"
-    assert engine.armed[0][2].max_ask == Decimal("0")
     assert engine.quotes == [("yes-token", Decimal("0.50"), Decimal("0.521"), 1_000_000)]
 
 
@@ -138,14 +137,13 @@ def test_one_point_zero_one_dollar_entry_size_rejected_when_notional_jump_too_la
     assert engine.armed == []
 
 
-def test_rearm_hysteresis_skips_tiny_price_move() -> None:
+def test_exact_same_target_does_not_rearm() -> None:
     engine = _Engine()
     builder = _Builder()
     armory = TemplateArmory(
         cfg=ArmoryConfig(
             usdc_per_trade=Decimal("10"),
             entry_slippage=Decimal("0.001"),
-            reprice_hysteresis_pct=Decimal("0.01"),
         ),
         engine=engine,
         build_template=builder,
@@ -153,7 +151,7 @@ def test_rearm_hysteresis_skips_tiny_price_move() -> None:
     )
 
     first = asyncio.run(armory.on_quote(signal="YES", token_id="yes", bid=Decimal("0.50"), ask=Decimal("0.50"), tick=Decimal("0.01")))
-    second = asyncio.run(armory.on_quote(signal="YES", token_id="yes", bid=Decimal("0.50"), ask=Decimal("0.501"), tick=Decimal("0.01")))
+    second = asyncio.run(armory.on_quote(signal="YES", token_id="yes", bid=Decimal("0.50"), ask=Decimal("0.50"), tick=Decimal("0.01")))
 
     assert first is True
     assert second is False
@@ -287,13 +285,12 @@ def test_configured_buy_limit_bounds_skip_out_of_band_quotes() -> None:
     assert engine.armed == []
 
 
-def test_guard_uses_executable_buy_limit_not_raw_quote_ask() -> None:
+def test_duplicate_canonical_target_does_not_rearm() -> None:
     engine = _Engine()
     builder = _Builder()
     armory = TemplateArmory(
         cfg=ArmoryConfig(
             usdc_per_trade=Decimal("10"),
-            reprice_hysteresis_pct=Decimal("0.05"),
         ),
         engine=engine,
         build_template=builder,
@@ -322,8 +319,7 @@ def test_guard_uses_executable_buy_limit_not_raw_quote_ask() -> None:
     assert first is True
     assert second is False
     assert len(builder.calls) == 1
-    assert engine.armed[0][1].price == Decimal("0.49")
-    assert engine.armed[0][2].max_ask == Decimal("0")
+    assert engine.armed[-1][1].price == Decimal("0.49")
     assert engine.disarmed == []
 
 
@@ -407,9 +403,9 @@ def test_identical_quote_does_not_rearm_when_builder_returns_canonical_size() ->
     async def _run() -> None:
         engine = _Engine()
         # ask=0.48 → buy_limit=0.48 → raw=ceil_to_2dp(10/0.48)=20.84
-        # Under default max_notional_overrun=0.01: ceil=20.8750 maker=10.02 > 10.01
-        # → floor=20.8125 maker=9.99 chosen
-        builder = _CanonicalizingBuilder(expected_size=Decimal("20.8125"))
+        # Under the SDK's 2dp limit-order size step, ceil=21.00 maker=10.08 > 10.01,
+        # so floor=20.75 maker=9.96 is chosen.
+        builder = _CanonicalizingBuilder(expected_size=Decimal("20.75"))
         armory = TemplateArmory(
             cfg=ArmoryConfig(usdc_per_trade=Decimal("10"), entry_slippage=Decimal("0")),
             engine=engine,
@@ -433,7 +429,7 @@ def test_identical_quote_does_not_rearm_when_builder_returns_canonical_size() ->
         assert first is True
         assert second is False, "identical quote must not rearm"
         assert len(builder.calls) == 1
-        assert engine.armed[0][1].size == Decimal("20.8125")
+        assert engine.armed[0][1].size == Decimal("20.75")
 
     asyncio.run(_run())
 
@@ -441,8 +437,8 @@ def test_identical_quote_does_not_rearm_when_builder_returns_canonical_size() ->
 @pytest.mark.parametrize(
     "ask,expected_size",
     [
-        # Under max_notional_overrun=0.01: 0.48 ceil=20.8750 maker=10.02 > 10.01 → floor=20.8125
-        (Decimal("0.48"), Decimal("20.8125")),
+        # Under the SDK's 2dp limit-order size step: 0.48 ceil=21.00 maker=10.08 > 10.01 -> floor=20.75
+        (Decimal("0.48"), Decimal("20.75")),
         # 0.51 ceil=20.0000 maker=10.20 > 10.01 → floor=19.0000
         (Decimal("0.51"), Decimal("19.0000")),
         # 0.50 floor=ceil=20.0000 maker=10.00
@@ -556,7 +552,7 @@ def test_armory_accepts_valid_near_min_when_within_cap() -> None:
 
 
 def test_armory_uses_floor_when_ceil_exceeds_notional_cap() -> None:
-    """price=0.48, target=$10: ceil maker=$10.02 > $10.01 → floor=$9.99 chosen."""
+    """price=0.48, target=$10: SDK-size ceil maker=$10.08 > $10.01 -> floor=$9.96 chosen."""
     engine = _Engine()
     builder = _Builder()
     armory = TemplateArmory(
@@ -577,5 +573,5 @@ def test_armory_uses_floor_when_ceil_exceeds_notional_cap() -> None:
 
     assert changed is True
     assert builder.calls[0]["price"] == Decimal("0.48")
-    assert builder.calls[0]["size"] == Decimal("20.8125")
-    assert builder.calls[0]["price"] * builder.calls[0]["size"] == Decimal("9.99")
+    assert builder.calls[0]["size"] == Decimal("20.75")
+    assert builder.calls[0]["price"] * builder.calls[0]["size"] == Decimal("9.9600")

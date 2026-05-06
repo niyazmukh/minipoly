@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from decimal import Decimal, ROUND_DOWN
+from decimal import Decimal, ROUND_CEILING, ROUND_DOWN
 
 from runtime_state import QuoteState
 
@@ -26,10 +26,9 @@ class ExitPolicyConfig:
     stop_loss_bps: int = 1800
     max_hold_us: int = 0
     force_exit_tte_us: int = 10_000_000
-    max_quote_age_us: int = 250_000
-    min_bid: Decimal = Decimal("0.01")
     order_type: str = "FAK"
     signal: str = "EXIT"
+    fak_attempts: int = 3
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,6 +66,12 @@ def price_at_tick(price: Decimal, tick: Decimal) -> Decimal:
     return (price / tick).to_integral_value(rounding=ROUND_DOWN) * tick
 
 
+def price_at_or_above_tick(price: Decimal, tick: Decimal) -> Decimal:
+    if tick <= 0:
+        return price
+    return (price / tick).to_integral_value(rounding=ROUND_CEILING) * tick
+
+
 def sell_decision(
     reason: str,
     position: OpenPosition,
@@ -81,6 +86,27 @@ def sell_decision(
         token_id=position.token_id,
         size=size,
         limit_price=price_at_tick(quote.bid, quote.tick),
+        bid=quote.bid,
+        ask=quote.ask,
+        tick=quote.tick,
+        order_type=cfg.order_type,
+        signal=cfg.signal,
+    )
+
+
+def take_profit_decision(
+    position: OpenPosition,
+    quote: QuoteState,
+    cfg: ExitPolicyConfig,
+    size: Decimal,
+) -> ExitDecision:
+    return ExitDecision(
+        "SELL",
+        "take_profit",
+        side=position.side,
+        token_id=position.token_id,
+        size=size,
+        limit_price=price_at_or_above_tick(_target(position.entry_price, cfg.take_profit_bps), quote.tick),
         bid=quote.bid,
         ask=quote.ask,
         tick=quote.tick,
@@ -105,19 +131,11 @@ def decide_exit(
     if sellable_size <= 0:
         return _hold("no_sellable_inventory", position)
 
-    quote_age_us = max(0, (int(now_ns) - quote.ts_ns) // 1000)
-    if quote_age_us > cfg.max_quote_age_us:
-        return _hold("quote_stale", position)
-    if quote.bid < cfg.min_bid:
-        return _hold("bid_below_min", position)
-
     size = min(position.size, sellable_size)
     if tte_us <= cfg.force_exit_tte_us:
         return sell_decision("expiry_ripcord", position, quote, cfg, size)
     if cfg.max_hold_us > 0 and (int(now_ns) - position.opened_ns) // 1000 >= cfg.max_hold_us:
         return sell_decision("time_stop", position, quote, cfg, size)
-    if quote.bid >= _target(position.entry_price, cfg.take_profit_bps):
-        return sell_decision("take_profit", position, quote, cfg, size)
     if cfg.stop_loss_bps > 0 and quote.bid <= _floor(position.entry_price, cfg.stop_loss_bps):
         return sell_decision("stop_loss", position, quote, cfg, size)
-    return _hold("hold", position)
+    return take_profit_decision(position, quote, cfg, size)

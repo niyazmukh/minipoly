@@ -111,7 +111,7 @@ Key is at `.ssh_tmp/poly-buy-sell.pem` (repo-relative). EC2 host: `34.244.40.198
 - **No full SDK `create_and_post_order()` on signal** — pre-signed templates + fresh L2 headers
 - **No subprocess wrappers, no JSON log writes on hot path, no raw event pretty-printing**
 - **Sell inventory = MATCHED** (immediately sellable, no CONFIRMED wait), floored to 0.01 share quantum. Evidence: `order_tracker.py` `sellable()` uses MATCHED.
-- **FAK entries, FAK exits** — exits use multi-attempt FAK burst (`MINIMAL_EXIT_FAK_ATTEMPTS=3`), no resting orders. Evidence: `minimal_live_bot.py:303`, `bot_orchestrator.py:385-401`.
+- **FAK entries, FAK exits** — exits use multi-attempt FAK burst (`MINIMAL_EXIT_FAK_ATTEMPTS=3`), no resting orders. Evidence: `minimal_live_bot.py`, `bot_orchestrator.py`.
 - **Multi-position**: max 3 concurrent (all scopes), exit loop iterates all positions
 - **`MINIMAL_USDC_PER_TRADE >= 1.01`** — 1.00 serializes below venue $1 minimum
 - **Startup fails closed** unless `MINIMAL_MIN_BUY_LIMIT` and `MINIMAL_DECISION_MIN_TTE_US` are set
@@ -123,12 +123,13 @@ Key is at `.ssh_tmp/poly-buy-sell.pem` (repo-relative). EC2 host: `34.244.40.198
 | Var | Current | Purpose |
 |-----|---------|---------|
 | `MINIMAL_USDC_PER_TRADE` | 1.01 | Marketable BUY budget |
-| `MINIMAL_MIN_BUY_LIMIT` | 0.10 | Min entry price floor |
-| `MINIMAL_MAX_BUY_LIMIT` | 0.85 | Max entry price (max_ask) |
+| `MINIMAL_MIN_BUY_LIMIT` | 0.35 | Min entry executable price floor |
+| `MINIMAL_MAX_BUY_LIMIT` | 0.65 | Max entry executable price |
 | `MINIMAL_DECISION_MIN_TTE_US` | 45000000 | No-entry window (45s) |
 | `MINIMAL_DECISION_MIN_EDGE` | 0.05 | Universal edge floor |
-| `MINIMAL_ENTRY_SLIPPAGE` | 0.05 | Spread crossing for FAK fills |
-| `MINIMAL_STOP_LOSS_BPS` | 0 | Disabled (0 bps = always triggers from spread) |
+| `MINIMAL_ENTRY_SLIPPAGE` | 0.03 | Added to entry edge math and BUY limit |
+| `MINIMAL_TAKE_PROFIT_BPS` | 1000 | FAK SELL target over entry price |
+| `MINIMAL_STOP_LOSS_BPS` | 0 | Disabled |
 | `MINIMAL_PROB_SIGMA_FLOOR_USD` | 2.0 | Volatility floor for prob model |
 | `MINIMAL_PROB_SIGMA_SCALE` | 1.5 | Volatility scale multiplier |
 | `MINIMAL_PROB_GAMMA_MOVE` | 0.5 | Weight of momentum in drift |
@@ -137,10 +138,8 @@ Key is at `.ssh_tmp/poly-buy-sell.pem` (repo-relative). EC2 host: `34.244.40.198
 | `POLY_ALLOW_LIVE_ORDERS` | true | Required for live trading |
 | `MINIMAL_REQUIRE_CALIBRATED_MODEL` | false | Set true when model is fitted |
 | `MINIMAL_ENTRY_ORDER_TYPE` | FAK | Only FAK supported; `_order_type_env` rejects non-FAK. Evidence: `minimal_live_bot.py:128-129` |
-| `MINIMAL_EXIT_ORDER_TYPE` | FAK | Hardcoded; env var ignored. Evidence: `minimal_live_bot.py:303` |
 | `MINIMAL_EXIT_FAK_ATTEMPTS` | 3 | FAK exit burst count. Evidence: `exit_policy.py:32`, `minimal_live_bot.py:314` |
 | `MINIMAL_SIGNAL_COOLDOWN_US` | 1000000 | 1s debounce between same-side BUY signals. Evidence: `binance_signal_engine.py:319` |
-| `MINIMAL_ALLOW_RESTING_ORDERS` | false | Not used for exits (always FAK). `_order_type_env` rejects resting types. |
 | `MINIMAL_MAX_CONCURRENT_POSITIONS` | 3 | Cap concurrent entries |
 
 ## Testing

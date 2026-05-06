@@ -40,6 +40,7 @@ class MarketSignalContract:
 class SignalDecisionConfig:
     max_ask: float
     min_ask: float = 0.0
+    entry_slippage: float = 0.0
     max_quote_age_us: int = 250_000
     min_tte_us: int = 2_000_000
     min_strength: float = 3.0
@@ -93,17 +94,18 @@ def decide_buy(
         return SignalDecision("NO_BUY", "quote_stale", side=side, token_id=token_id)
     if ask <= 0.0:
         return SignalDecision("NO_BUY", "invalid_ask", side=side, token_id=token_id)
-    if cfg.min_ask > 0.0 and ask < cfg.min_ask:
+    executable_ask = ask + max(0.0, cfg.entry_slippage)
+    if cfg.min_ask > 0.0 and executable_ask < cfg.min_ask:
         return SignalDecision("NO_BUY", "ask_below_limit", side=side, token_id=token_id)
-    if cfg.max_ask > 0.0 and ask > cfg.max_ask:
+    if cfg.max_ask > 0.0 and executable_ask > cfg.max_ask:
         return SignalDecision("NO_BUY", "ask_above_limit", side=side, token_id=token_id)
     if signal.strength < cfg.min_strength:
         return SignalDecision("NO_BUY", "weak_signal", side=side, token_id=token_id)
 
     if cfg.use_legacy_fair:
         fair = _strength_to_fair(signal.strength, cfg.strength_price_scale)
-        edge = fair - ask
-        min_edge = _effective_min_edge(cfg, ask=ask, bid=bid)
+        edge = fair - executable_ask
+        min_edge = _effective_min_edge(cfg, ask=executable_ask, bid=bid)
         if edge < min_edge:
             return SignalDecision("NO_BUY", "edge_below_min", side=side, token_id=token_id, edge=edge)
         return SignalDecision("BUY", "edge_ok_legacy", side=side, token_id=token_id, edge=edge)
@@ -116,8 +118,8 @@ def decide_buy(
         side_prob = p_yes
     else:
         side_prob = 1.0 - p_yes
-    edge = side_prob - ask
-    min_edge = _effective_min_edge(cfg, ask=ask, bid=bid)
+    edge = side_prob - executable_ask
+    min_edge = _effective_min_edge(cfg, ask=executable_ask, bid=bid)
     if edge < min_edge:
         return SignalDecision("NO_BUY", "edge_below_min", side=side, token_id=token_id, edge=edge)
     # Absolute probability floor applies only to expensive tokens (ask >= 0.50).
@@ -125,7 +127,7 @@ def decide_buy(
     # edge is strong (0.17), the expected return justifies the trade.
     # SF1 (Dubach 2026, Table 1) supports spread-aware scrutiny via
     # _effective_min_edge above, not a universal absolute-probability floor.
-    if ask >= 0.50 and side_prob < cfg.min_prob:
+    if executable_ask >= 0.50 and side_prob < cfg.min_prob:
         return SignalDecision("NO_BUY", "prob_below_floor", side=side, token_id=token_id, edge=edge)
     return SignalDecision("BUY", "edge_ok", side=side, token_id=token_id, edge=edge)
 

@@ -3,12 +3,13 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections import deque
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation, ROUND_CEILING, ROUND_DOWN
 from typing import Any, Callable, Protocol
 
 from basis_estimator import BasisEstimator
 from binance_signal_engine import BinanceSignalConfig, BinanceSignalEngine
-from exit_policy import ExitDecision, ExitPolicyConfig, OpenPosition, decide_exit, sell_decision
+from exit_policy import ExitDecision, ExitPolicyConfig, OpenPosition, decide_exit, take_profit_decision
+from log_utils import full_trace_enabled
 from order_tracker import LocalOrderTracker, TradeState
 from polymarket_market_feed import apply_market_event
 from runtime_state import MinimalMarket, MinimalRuntimeState
@@ -31,15 +32,51 @@ CONTEXT_EVENT_TYPE = "minimal_market_context"
 INACTIVE_EVENT_TYPE = "minimal_market_inactive"
 
 _DEC_TWO = Decimal("2")
+_DEC_ZERO = Decimal("0")
+_DEC_ONE = Decimal("1")
+_DEC_HALF = Decimal("0.50")
+_BPS = Decimal("10000")
+_SIZE_QUANTUM = Decimal("0.01")
+_DEFAULT_TICK = Decimal("0.01")
 _LOG = logging.getLogger(__name__)
 
 
 def _result_attempted_submit(result: Any) -> bool:
-    if isinstance(result, dict) and bool(result.get("submitted", False)):
-        return True
+    if isinstance(result, dict):
+        if bool(result.get("submitted", False)):
+            return True
+        return int(result.get("latency_ns") or 0) > 0
     if bool(getattr(result, "submitted", False)):
         return True
     return int(getattr(result, "latency_ns", 0) or 0) > 0
+
+
+def _result_response(result: Any) -> dict[str, Any]:
+    response = result.get("response") if isinstance(result, dict) else getattr(result, "response", None)
+    return response if isinstance(response, dict) else {}
+
+
+def _result_reason(result: Any) -> str:
+    if isinstance(result, dict):
+        return str(result.get("reason") or "")
+    return str(getattr(result, "reason", "") or "")
+
+
+def _dec(raw: Any) -> Decimal:
+    try:
+        return Decimal(str(raw))
+    except (InvalidOperation, TypeError, ValueError):
+        return _DEC_ZERO
+
+
+def _floor_to_size_quantum(size: Decimal) -> Decimal:
+    return (size / _SIZE_QUANTUM).to_integral_value(rounding=ROUND_DOWN) * _SIZE_QUANTUM
+
+
+def _ceil_to_tick(price: Decimal, tick: Decimal) -> Decimal:
+    if tick <= 0:
+        return price
+    return (price / tick).to_integral_value(rounding=ROUND_CEILING) * tick
 
 
 class _Armory(Protocol):
@@ -94,6 +131,7 @@ class MinimalBotOrchestrator:
         "_anchor_buffer",
         "_pending_anchor_slug_ts",
         "_last_exit_diag_ns",
+        "_full_trace_log",
     )
 
     def __init__(
@@ -124,6 +162,7 @@ class MinimalBotOrchestrator:
         self._anchor_buffer: deque[tuple[int, float]] = deque()
         self._pending_anchor_slug_ts: int = 0
         self._last_exit_diag_ns = 0
+        self._full_trace_log = full_trace_enabled()
 
     def configure_exit_policy(
         self,
@@ -141,7 +180,7 @@ class MinimalBotOrchestrator:
     async def on_market_event(self, event: dict[str, Any]) -> bool:
         et = str(event.get("event_type") or event.get("eventType") or event.get("type") or "").strip().lower()
         if et == CONTEXT_EVENT_TYPE:
-            self._apply_market_context(event)
+            await self._apply_market_context(event)
             return True
         if et == INACTIVE_EVENT_TYPE:
             self._apply_market_inactive(event)
@@ -256,15 +295,72 @@ class MinimalBotOrchestrator:
         if decision.action == "BUY":
             result = await self._hot_path.on_signal(decision.side)
             _LOG.warning("entry_hot_path_result side=%s result=%r", decision.side, result)
-            if _result_attempted_submit(result):
+            attempted_submit = _result_attempted_submit(result)
+            if attempted_submit and _result_reason(result) == "submit_failed":
                 retire = getattr(self._armory, "retire", None)
                 if callable(retire):
                     retire(decision.side)
+                await self._rearm_entry_from_latest_quote(decision.side)
+            asyncio.create_task(
+                self._immediate_take_profit_burst(decision, result),
+                name="minimal-imm-tp",
+            )
         return decision
+
+    async def _rearm_entry_from_latest_quote(self, side: str) -> bool:
+        quote = self.state.quote_for_side(side)
+        if quote is None:
+            return False
+        return await self._armory.on_quote(
+            signal=side,
+            token_id=quote.token_id,
+            bid=quote.bid,
+            ask=quote.ask,
+            tick=quote.tick,
+        )
+
+    async def _immediate_take_profit_burst(self, decision: SignalDecision, result: Any) -> None:
+        if self._exit_cfg is None or self._exit_armory is None:
+            return
+        response = _result_response(result)
+        if str(response.get("status") or "").strip().upper() not in {"MATCHED", "FILLED"}:
+            return
+        raw_size = _dec(response.get("takingAmount"))
+        cost = _dec(response.get("makingAmount"))
+        size = _floor_to_size_quantum(raw_size)
+        quote = self.state.quotes.get(decision.token_id)
+        if raw_size <= 0 or cost <= 0 or size <= 0 or quote is None:
+            return
+        entry = cost / raw_size
+        limit = _ceil_to_tick(entry * (_DEC_ONE + Decimal(int(self._exit_cfg.take_profit_bps)) / _BPS), quote.tick)
+        if limit <= 0 or limit > Decimal("0.99"):
+            return
+        exit_decision = ExitDecision(
+            "SELL",
+            "immediate_take_profit",
+            side=decision.side,
+            token_id=decision.token_id,
+            size=size,
+            limit_price=limit,
+            bid=quote.bid,
+            ask=quote.ask,
+            tick=quote.tick,
+            order_type=self._exit_cfg.order_type,
+            signal=self._exit_cfg.signal,
+        )
+        for _ in range(max(1, int(self._exit_cfg.fak_attempts))):
+            armed = await self._exit_armory.arm_exit(exit_decision, quote_ts_ns=self.state.now_ns())
+            if not armed:
+                return
+            sell_result = await self._hot_path.on_signal(exit_decision.signal)
+            _LOG.warning("immediate_exit_hot_path_result side=%s result=%r", decision.side, sell_result)
+            retire = getattr(self._exit_armory, "retire", None)
+            if callable(retire):
+                retire(exit_decision.signal)
 
     def _maybe_log_signal_status(self) -> None:
         now_ns = self.state.now_ns()
-        if now_ns - self._last_signal_status_ns < 5_000_000_000:
+        if not self._full_trace_log and now_ns - self._last_signal_status_ns < 5_000_000_000:
             return
         self._last_signal_status_ns = now_ns
         snap = self.signal_engine.snapshot()
@@ -309,7 +405,7 @@ class MinimalBotOrchestrator:
         quote_age_us: int = -1,
     ) -> None:
         now_ns = self.state.now_ns()
-        if now_ns - self._last_exit_diag_ns < 5_000_000_000:
+        if not self._full_trace_log and now_ns - self._last_exit_diag_ns < 5_000_000_000:
             return
         self._last_exit_diag_ns = now_ns
         _LOG.warning(
@@ -392,15 +488,13 @@ class MinimalBotOrchestrator:
                 retire = getattr(self._exit_armory, "retire", None)
                 if callable(retire):
                     retire(decision.signal)
-                if self._tracker.sellable(asset_id) > 0:
-                    self._schedule_exit_evaluation()
             if attempted_submit:
                 return decision
         return ExitDecision("HOLD", "no_sellable_position")
 
     # ---- market context plumbing -----------------------------------------
 
-    def _apply_market_context(self, event: dict[str, Any]) -> None:
+    async def _apply_market_context(self, event: dict[str, Any]) -> None:
         market = MinimalMarket(
             slug=str(event.get("slug") or ""),
             condition_id=str(event.get("condition_id") or event.get("conditionId") or ""),
@@ -428,6 +522,27 @@ class MinimalBotOrchestrator:
                 self._exit_armory.reset()
             self._anchor_strike_on_rotation(market)
         self._sync_hot_path_exposure_scope()
+        if rotated and self.state.trading_active and self._entry_allowed():
+            await self._prearm_midpoint_entries(market)
+
+    async def _prearm_midpoint_entries(self, market: MinimalMarket) -> None:
+        slippage = max(_DEC_ZERO, _dec(self._decision_cfg.entry_slippage))
+        synthetic_ask = max(_DEFAULT_TICK, _DEC_HALF - slippage)
+        synthetic_bid = max(_DEFAULT_TICK, synthetic_ask - _DEFAULT_TICK)
+        await self._armory.on_quote(
+            signal="YES",
+            token_id=market.yes_token_id,
+            bid=synthetic_bid,
+            ask=synthetic_ask,
+            tick=_DEFAULT_TICK,
+        )
+        await self._armory.on_quote(
+            signal="NO",
+            token_id=market.no_token_id,
+            bid=synthetic_bid,
+            ask=synthetic_ask,
+            tick=_DEFAULT_TICK,
+        )
 
     def _anchor_strike_on_rotation(self, market: MinimalMarket) -> None:
         """Seed the signal engine's strike for the new market.
@@ -612,20 +727,29 @@ class MinimalBotOrchestrator:
             return
         if not self.state.trading_active:
             return
-        if self.state.position is None:
-            self._sync_position_from_tracker()
-        position = self.state.position
-        if position is None:
-            return
-        quote = self.state.quotes.get(position.token_id)
-        if quote is None or quote.bid <= 0:
-            return
-        if position.size <= 0:
-            return
-        self._exit_armory.prepare_exit(
-            sell_decision("prearm", position, quote, self._exit_cfg, position.size),
-            quote_ts_ns=quote.ts_ns,
-        )
+        # Iterate all owned positions so pre-arm covers multi-position.
+        for asset_id in list(self._tracker.owned_by_asset):
+            owned, entry = self._tracker.position_size_and_entry(asset_id)
+            if owned <= 0 or entry <= 0:
+                continue
+            quote = self.state.quotes.get(asset_id)
+            if quote is None or quote.bid <= 0:
+                continue
+            side = self.state.side_for_token(asset_id) or "UNKNOWN"
+            position = OpenPosition(
+                side=side,
+                token_id=asset_id,
+                entry_price=entry,
+                size=owned,
+                opened_ns=0,
+            )
+            # Use take_profit_decision so the pre-armed template matches what
+            # evaluate_exit will request — _same_exit returns True and arm_exit
+            # skips re-signing.  Expiry/stop-loss override at evaluation time.
+            self._exit_armory.prepare_exit(
+                take_profit_decision(position, quote, self._exit_cfg, owned),
+                quote_ts_ns=quote.ts_ns,
+            )
 
     def _sync_hot_path_exposure_scope(self) -> None:
         market = self.state.market

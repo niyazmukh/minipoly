@@ -1,27 +1,9 @@
-import argparse
-import asyncio
 import dataclasses
 import os
-import re
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation, ROUND_DOWN
-from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 
-import orjson
-import websockets
-from dotenv import load_dotenv
-from py_clob_client.client import ClobClient
-
-# Official references (discoverable from minimal/docs/llms.md):
-# - https://docs.polymarket.com/api-reference/wss/user.md
-# - https://docs.polymarket.com/market-data/websocket/user-channel.md
-# - https://docs.polymarket.com/concepts/order-lifecycle.md
-# - https://docs.polymarket.com/concepts/positions-tokens.md
-
-WS_USER_URL = "wss://ws-subscriptions-clob.polymarket.com/ws/user"
-SCRIPT_ENV_FILE = Path(__file__).resolve().parent / ".env.poly"
-DEFAULT_REPLAY_LOG = Path(__file__).resolve().parent / "docs" / "userchannel.log"
 _DEC_ZERO = Decimal("0")
 _SIZE_QUANTUM = Decimal("0.01")
 
@@ -132,23 +114,6 @@ def _is_invalid_trade_transition(prev_status: str, next_status: str) -> bool:
     if allowed is None:
         return False
     return next_status not in allowed
-
-
-def _to_events(payload: Any) -> list[dict[str, Any]]:
-    if isinstance(payload, dict):
-        return [payload]
-    if isinstance(payload, list):
-        return [x for x in payload if isinstance(x, dict)]
-    return []
-
-
-def _event_kind(ev: dict[str, Any]) -> str:
-    et = str(ev.get("event_type") or ev.get("eventType") or ev.get("type") or "").strip().lower()
-    if et == "trade":
-        return "trade"
-    if et == "order" or et in {"placement", "update", "cancellation"}:
-        return "order"
-    return ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -461,20 +426,6 @@ class LocalOrderTracker:
             if order.status not in _TERMINAL_ORDER_STATUSES and _floor_size_to_quantum(order.remaining) > 0:
                 return True
         return False
-
-    # UNCALLED: remnant of removed buy-cycle lock.  Kept for reference.
-    def trade_count(self) -> int:
-        return len(self.trades)
-
-    # UNCALLED: remnant of removed buy-cycle lock.  Kept for reference.
-    def trade_count_in_scope(self, scope: set[str] | frozenset[str] | None) -> int:
-        if not scope:
-            return len(self.trades)
-        n = 0
-        for trade in self.trades.values():
-            if trade.asset_id in scope:
-                n += 1
-        return n
 
     def on_order_event(self, msg: dict[str, Any]) -> OrderState | None:
         order_id = str(msg.get("id") or msg.get("order_id") or "").strip()
@@ -804,180 +755,3 @@ class LocalOrderTracker:
             )
 
 
-async def _resolve_api_creds() -> tuple[str, str, str]:
-    api_key = os.getenv("POLY_API_KEY", "").strip()
-    api_secret = os.getenv("POLY_API_SECRET", "").strip()
-    api_passphrase = os.getenv("POLY_API_PASSPHRASE", "").strip()
-    if api_key and api_secret and api_passphrase:
-        return api_key, api_secret, api_passphrase
-
-    private_key = os.getenv("POLY_PK", "").strip() or os.getenv("PRIVATE_KEY", "").strip()
-    if not private_key:
-        raise RuntimeError(
-            "Missing credentials: set POLY_API_KEY/POLY_API_SECRET/POLY_API_PASSPHRASE "
-            "or set POLY_PK (or PRIVATE_KEY) to derive API creds."
-        )
-    private_key = private_key.strip().strip('"').strip("'")
-    if private_key.lower().startswith("0x"):
-        private_key = private_key[2:]
-    if len(private_key) != 64 or re.fullmatch(r"[0-9a-fA-F]{64}", private_key) is None:
-        raise RuntimeError("POLY_PK/PRIVATE_KEY format is invalid; expected 64 hex chars (optional 0x prefix).")
-    private_key = "0x" + private_key
-
-    clob_host = os.getenv("POLY_CLOB_HOST", "https://clob.polymarket.com").strip() or "https://clob.polymarket.com"
-    chain_id = int(os.getenv("POLY_CHAIN_ID", "137"))
-    signature_type = int(os.getenv("POLY_SIG_TYPE", "0"))
-    funder = os.getenv("POLY_FUNDER", "").strip()
-
-    if funder:
-        client = ClobClient(host=clob_host, key=private_key, chain_id=chain_id, signature_type=signature_type, funder=funder)
-    else:
-        client = ClobClient(host=clob_host, key=private_key, chain_id=chain_id, signature_type=signature_type)
-    creds = await asyncio.to_thread(client.create_or_derive_api_creds)
-    if not creds.api_key or not creds.api_secret or not creds.api_passphrase:
-        raise RuntimeError("Failed to derive API credentials from POLY_PK.")
-    return str(creds.api_key), str(creds.api_secret), str(creds.api_passphrase)
-
-
-async def _consume_live(tracker: LocalOrderTracker) -> None:
-    api_key, api_secret, api_passphrase = await _resolve_api_creds()
-    ws_url = os.getenv("POLY_WS_USER", WS_USER_URL).strip() or WS_USER_URL
-
-    backoff = 0.25
-    while True:
-        try:
-            async with websockets.connect(
-                ws_url,
-                ping_interval=20,
-                ping_timeout=10,
-                compression=None,
-                open_timeout=5,
-                close_timeout=2,
-                max_queue=8192,
-            ) as ws:
-                auth_msg = {
-                    "auth": {
-                        "apiKey": api_key,
-                        "secret": api_secret,
-                        "passphrase": api_passphrase,
-                    },
-                    "type": "user",
-                }
-                await ws.send(orjson.dumps(auth_msg).decode("utf-8"))
-                _safe_print("user channel subscribed")
-                backoff = 0.25
-
-                while True:
-                    raw = await ws.recv()
-                    try:
-                        if isinstance(raw, bytes):
-                            payload = orjson.loads(raw)
-                        elif isinstance(raw, str):
-                            msg = raw.strip()
-                            if msg in ("PONG", "pong", "PING", "ping", ""):
-                                continue
-                            payload = orjson.loads(msg)
-                        else:
-                            payload = raw
-                    except orjson.JSONDecodeError:
-                        continue
-                    for ev in _to_events(payload):
-                        kind = _event_kind(ev)
-                        if kind == "order":
-                            tracker.on_order_event(ev)
-                        elif kind == "trade":
-                            tracker.on_trade_event(ev)
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            _safe_print(f"user ws disconnected: {exc!r}; reconnecting in {backoff:.2f}s")
-            await asyncio.sleep(backoff)
-            backoff = min(5.0, backoff * 1.7)
-
-
-def _iter_events_from_log(path: Path) -> Iterator[dict[str, Any]]:
-    buf: list[str] = []
-    depth = 0
-    collecting = False
-    with path.open("r", encoding="utf-8", errors="replace") as f:
-        for line in f:
-            if not collecting:
-                stripped = line.lstrip()
-                if stripped.startswith("{"):
-                    collecting = True
-                    buf = [line]
-                    depth = line.count("{") - line.count("}")
-                    if depth == 0:
-                        try:
-                            obj = orjson.loads("".join(buf))
-                            if isinstance(obj, dict):
-                                yield obj
-                        except orjson.JSONDecodeError:
-                            pass
-                        collecting = False
-                        buf = []
-                continue
-
-            buf.append(line)
-            depth += line.count("{") - line.count("}")
-            if depth <= 0:
-                text = "".join(buf)
-                try:
-                    obj = orjson.loads(text)
-                    if isinstance(obj, dict):
-                        yield obj
-                except orjson.JSONDecodeError:
-                    pass
-                collecting = False
-                buf = []
-                depth = 0
-
-
-def _run_replay(path: Path, tracker: LocalOrderTracker) -> None:
-    if not path.exists():
-        raise RuntimeError(f"Replay log not found: {path}")
-    count = 0
-    for ev in _iter_events_from_log(path):
-        kind = _event_kind(ev)
-        if kind == "order":
-            tracker.on_order_event(ev)
-            count += 1
-        elif kind == "trade":
-            tracker.on_trade_event(ev)
-            count += 1
-    _safe_print(f"replay complete events={count}")
-    tracker.dump_positions()
-
-
-def _parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Minimal order/trade tracker over Polymarket user channel. Tracks order status and sellable inventory."
-    )
-    parser.add_argument(
-        "--replay-log",
-        default="",
-        help="Replay events from a user channel log file instead of live WS.",
-    )
-    return parser.parse_args()
-
-
-async def _async_main() -> None:
-    args = _parse_args()
-    load_dotenv(SCRIPT_ENV_FILE, override=True)
-
-    tracker = LocalOrderTracker()
-    if args.replay_log:
-        _run_replay(Path(args.replay_log).resolve(), tracker)
-        return
-
-    if DEFAULT_REPLAY_LOG.exists():
-        _safe_print(f"tip: to validate quickly use --replay-log \"{DEFAULT_REPLAY_LOG}\"")
-    await _consume_live(tracker)
-
-
-if __name__ == "__main__":
-    try:
-        asyncio.run(_async_main())
-    except RuntimeError as exc:
-        _safe_print(f"config error: {exc}")
-        raise SystemExit(2) from exc

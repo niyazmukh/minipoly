@@ -31,6 +31,7 @@ from config import BotConfig
 from exit_policy import ExitPolicyConfig
 from fast_order_submitter import DryRunOrderSubmitter, FastOrderSubmitter, HeaderSigner, prepare_template
 from http_client import CLOBHttpClient
+from log_utils import configure_logging, log_level
 from order_placer import MinimalOrderConfig, _env_float, _env_int
 from runtime_state import MinimalRuntimeState
 from runtime_wiring import MinimalRuntime, RuntimeWiringConfig, build_runtime
@@ -253,7 +254,7 @@ async def build_live_bot() -> LiveBot:
             v2_clob,
             owner=api_key,
             order_type=kwargs.pop("order_type"),
-            post_only=bool(kwargs.pop("post_only", order_cfg.post_only)),
+            post_only=bool(kwargs.pop("post_only", False)),
             **kwargs,
         )
 
@@ -286,8 +287,7 @@ async def build_live_bot() -> LiveBot:
             min_buy_limit=min_buy_limit,
             max_buy_limit=max_buy_limit,
             order_type=_order_type_env("MINIMAL_ENTRY_ORDER_TYPE", "FAK"),
-            post_only=_bool_env("MINIMAL_ENTRY_POST_ONLY", order_cfg.post_only),
-            reprice_hysteresis_pct=_dec_env("MINIMAL_REPRICE_HYSTERESIS_PCT", "0.002"),
+            post_only=False,
             max_quote_age_ns=_int_env("MINIMAL_MAX_QUOTE_AGE_NS", 250_000_000),
             max_notional_overrun=_dec_env("MINIMAL_MAX_NOTIONAL_OVERRUN", "0.01"),
             max_notional_overrun_bps=_int_env("MINIMAL_MAX_NOTIONAL_OVERRUN_BPS", 0),
@@ -297,10 +297,9 @@ async def build_live_bot() -> LiveBot:
             stop_loss_bps=_int_env("MINIMAL_STOP_LOSS_BPS", 1800),
             max_hold_us=_int_env("MINIMAL_MAX_HOLD_US", 0),
             force_exit_tte_us=_int_env("MINIMAL_FORCE_EXIT_TTE_US", 10_000_000),
-            max_quote_age_us=_int_env("MINIMAL_EXIT_MAX_QUOTE_AGE_US", 250_000),
-            min_bid=_dec_env("MINIMAL_EXIT_MIN_BID", "0.01"),
             # Strict exit mode: exits are always FAK.
             order_type="FAK",
+            fak_attempts=_int_env("MINIMAL_EXIT_FAK_ATTEMPTS", 3),
         ),
         signal_cfg=_apply_signal_engine_overrides(_binance_signal_cfg(), calibrated_model),
         decision_cfg=_apply_decision_overrides(
@@ -368,6 +367,7 @@ def _entry_decision_cfg(
         min_tte_us=min_entry_tte_us,
         min_strength=_float_env("MINIMAL_DECISION_MIN_STRENGTH", 3.0),
         min_edge=_float_env("MINIMAL_DECISION_MIN_EDGE", 0.05),
+        entry_slippage=float(_dec_env("MINIMAL_ENTRY_SLIPPAGE", "0")),
         strength_price_scale=_float_env("MINIMAL_DECISION_STRENGTH_PRICE_SCALE", 0.03),
         prob_alpha_ofi=_float_env("MINIMAL_PROB_ALPHA_OFI", 0.0),
         prob_beta_imb=_float_env("MINIMAL_PROB_BETA_IMB", 0.0),
@@ -386,7 +386,7 @@ async def ensure_flat_start(http, address: str, *, allow_dirty_start: bool) -> N
     if allow_dirty_start:
         return
     # Historical positions are intentionally ignored (current-run-only design).
-    # Only resting open orders are checked: an old order could fill during this
+    # Only open orders are checked: an old order could fill during this
     # run and create invisible inventory that the bot never sold.
     open_orders = await http.clob_open_order_count()
     if open_orders > 0:
@@ -524,7 +524,7 @@ async def run_live() -> None:
 
 def main() -> int:
     load_dotenv(SCRIPT_ENV_FILE, override=True)
-    logging.basicConfig(level=os.getenv("MINIMAL_LOG_LEVEL", "WARNING").upper(), force=True)
+    configure_logging(log_level("WARNING"))
     os.chdir(MINIMAL_ROOT)
     try:
         asyncio.run(run_live())

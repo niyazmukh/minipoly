@@ -4,56 +4,124 @@ Target: one Python asyncio process on Ubuntu EC2.
 
 ## SSH Access
 
-```bash
-# Key location (repo-relative):
-ssh -i ".ssh_tmp/poly-buy-sell.pem" -o StrictHostKeyChecking=no ubuntu@34.244.40.198
+From Windows PowerShell in repo root:
+
+```powershell
+$KEY = "C:\Users\niyaz\.repos\poly-buy-sell\minimal\.ssh_tmp\poly-buy-sell.pem"
+$HOST = "ubuntu@34.244.40.198"
+$REMOTE = "/home/ubuntu/minimal-bot"
+ssh -i $KEY -o StrictHostKeyChecking=no -o UserKnownHostsFile=NUL $HOST "pwd"
 ```
 
-- EC2 host: `34.244.40.198` (eu-west-1)
-- Bot dir: `/home/ubuntu/minimal-bot/`
-- Env file: `/home/ubuntu/minimal-bot/.env.poly`
-- **Never use `timeout` on SSH commands** — it kills the session. Use Bash `run_in_background` with generous timeout instead.
-- **Foreground SSH capture** is the only reliable way to get logs. File-based logging with `tee` buffers heavily.
-- **Use `kill -9 <PID>`** to stop the bot (find PID with `ps aux | grep minimal_live`). `pkill` may fail with exit 255 on this EC2 instance even for simple patterns.
+- EC2 host: `34.244.40.198` in `eu-west-1`.
+- EC2 user: `ubuntu`.
+- Bot dir: `/home/ubuntu/minimal-bot/`.
+- Env file: `/home/ubuntu/minimal-bot/.env.poly`.
+- Key: `C:\Users\niyaz\.repos\poly-buy-sell\minimal\.ssh_tmp\poly-buy-sell.pem`.
+- Never use `timeout` on SSH commands. It kills the SSH session and can drop output.
+- Do not kill every `python3` on EC2. Stop only PIDs whose args contain `minimal_live_bot.py`.
+- `pkill -f 'python3 -u minimal_live_bot.py'` can misparse because of `-u`; use explicit PID extraction below.
+- File-backed logging to `run_logs/*.log` is the preferred live-run capture. Avoid `tee` for long captures because it buffers.
 
-## Deploy Cycle (Working Pattern)
+If OpenSSH rejects the key with `UNPROTECTED PRIVATE KEY FILE`, `bad permissions`, or `Load key ... Permission denied`, fix Windows ACLs for the account that will run `ssh`:
 
-```bash
-# 1. Deploy all changed .py files
-scp -i ".ssh_tmp/poly-buy-sell.pem" -o StrictHostKeyChecking=no \
-  *.py ubuntu@34.244.40.198:/home/ubuntu/minimal-bot/
+```powershell
+icacls ".ssh_tmp\poly-buy-sell.pem" /inheritance:r /grant:r "$env:USERNAME:R"
+```
 
-# 2. Update env if needed
-ssh ... "sed -i 's/OLD=.*/NEW=VALUE/' /home/ubuntu/minimal-bot/.env.poly"
+Codex note: in the 2026-05-06 run, escalated SSH worked with owner-only `niyaz:R`. Sandbox-local SSH used a different account and was not the working path.
 
-# 3. Verify env
-ssh ... "grep -E 'MINIMAL_.*=|POLY_.*=' /home/ubuntu/minimal-bot/.env.poly"
+## Deploy And Run
 
-# 4. Kill old bot (find PID first)
-ssh ... "ps aux | grep minimal_live | grep -v grep"
-ssh ... "kill -9 <PID>"
+PowerShell variables:
 
-# 5. Start bot in background on EC2
-ssh ... "cd /home/ubuntu/minimal-bot && rm -f run_logs/*.log live.pid && \
-  nohup python3 -u minimal_live_bot.py > /tmp/bot_live.log 2>&1 & echo PID=\$!"
+```powershell
+$KEY = "C:\Users\niyaz\.repos\poly-buy-sell\minimal\.ssh_tmp\poly-buy-sell.pem"
+$HOST = "ubuntu@34.244.40.198"
+$REMOTE = "/home/ubuntu/minimal-bot"
+```
 
-# 6. Stream logs (separate SSH session or Monitor)
-ssh ... "tail -f /tmp/bot_live.log"
+1. Inspect process state:
 
-# 7. Fetch logs to local
-scp -i ".ssh_tmp/poly-buy-sell.pem" -o StrictHostKeyChecking=no \
-  ubuntu@34.244.40.198:/tmp/bot_live.log docs/bot_live_$(date +%Y%m%d_%H%M%S).log
+```powershell
+ssh -i $KEY -o StrictHostKeyChecking=no -o UserKnownHostsFile=NUL $HOST "ps -eo pid,ppid,etime,stat,args | grep '[m]inimal_live_bot.py' || true"
+```
+
+2. Stop only the minimal bot:
+
+```powershell
+ssh -i $KEY -o StrictHostKeyChecking=no -o UserKnownHostsFile=NUL $HOST "pids=\$(ps -eo pid=,args= | awk '/minimal_live_bot[.]py/{print \$1}'); if [ -n \"\$pids\" ]; then kill -9 \$pids; fi"
+```
+
+3. Wipe only runtime bot files. Keep `venv/`. Do not deploy docs, tests, or artifacts:
+
+```powershell
+ssh -i $KEY -o StrictHostKeyChecking=no -o UserKnownHostsFile=NUL $HOST "cd $REMOTE && find . -maxdepth 1 -type f -name '*.py' -delete && rm -f .env.poly live.pid && rm -rf __pycache__ && mkdir -p run_logs && rm -f run_logs/*.log"
+```
+
+4. Deploy root bot files and env only:
+
+```powershell
+scp -i $KEY -o StrictHostKeyChecking=no -o UserKnownHostsFile=NUL *.py .env.poly "${HOST}:${REMOTE}/"
+```
+
+5. Verify deployed file count and env:
+
+```powershell
+ssh -i $KEY -o StrictHostKeyChecking=no -o UserKnownHostsFile=NUL $HOST "cd $REMOTE && printf 'py_count=' && find . -maxdepth 1 -type f -name '*.py' | wc -l && grep -E 'MINIMAL_MAX_ASK|MINIMAL_MIN_BUY_LIMIT|MINIMAL_MAX_BUY_LIMIT|MINIMAL_ENTRY_SLIPPAGE|MINIMAL_TAKE_PROFIT_BPS|MINIMAL_EXIT_FAK_ATTEMPTS' .env.poly && sha256sum .env.poly"
+Get-FileHash -Algorithm SHA256 .env.poly
+```
+
+6. Start with full EC2 log capture and write `live.pid`:
+
+```powershell
+ssh -i $KEY -o StrictHostKeyChecking=no -o UserKnownHostsFile=NUL $HOST 'cd /home/ubuntu/minimal-bot; mkdir -p run_logs; log="run_logs/bot_live_$(date -u +%Y%m%d_%H%M%S).log"; setsid python3 -u minimal_live_bot.py > "$log" 2>&1 < /dev/null & pid=$!; echo $pid > live.pid; echo LOG=$log PID=$pid'
+```
+
+7. Confirm it is running:
+
+```powershell
+ssh -i $KEY -o StrictHostKeyChecking=no -o UserKnownHostsFile=NUL $HOST "cd $REMOTE && cat live.pid && ps -p \$(cat live.pid) -o pid,ppid,etime,stat,args"
+```
+
+If a previous start command timed out but the bot is running, repair `live.pid` from the actual Python process:
+
+```powershell
+ssh -i $KEY -o StrictHostKeyChecking=no -o UserKnownHostsFile=NUL $HOST 'cd /home/ubuntu/minimal-bot; pid=$(ps -C python3 -o pid= | tail -n 1); echo $pid > live.pid; echo PIDFILE=$(cat live.pid); latest=$(ls -t run_logs/*.log | head -1); echo LOG=$latest; tail -n 80 $latest'
+```
+
+8. Monitor without killing the bot:
+
+```powershell
+ssh -i $KEY -o StrictHostKeyChecking=no -o UserKnownHostsFile=NUL $HOST "cd $REMOTE && tail -n 120 -f \$(ls -t run_logs/*.log | head -1)"
+```
+
+9. Stop only when explicitly requested:
+
+```powershell
+ssh -i $KEY -o StrictHostKeyChecking=no -o UserKnownHostsFile=NUL $HOST "cd $REMOTE && if [ -f live.pid ]; then kill -9 \$(cat live.pid) 2>/dev/null || true; fi; pids=\$(ps -eo pid=,args= | awk '/minimal_live_bot[.]py/{print \$1}'); if [ -n \"\$pids\" ]; then kill -9 \$pids; fi"
+```
+
+10. Fetch full latest log:
+
+```powershell
+$LOCAL_LOG = "docs\bot_live_$(Get-Date -Format yyyyMMdd_HHmmss)_ec2.log"
+$REMOTE_LOG = ssh -i $KEY -o StrictHostKeyChecking=no -o UserKnownHostsFile=NUL $HOST "cd $REMOTE && ls -t run_logs/*.log | head -1"
+scp -i $KEY -o StrictHostKeyChecking=no -o UserKnownHostsFile=NUL "${HOST}:${REMOTE_LOG}" $LOCAL_LOG
+python docs\analyze_bot_logs.py $LOCAL_LOG --context 3
 ```
 
 ## Current EC2 Env Baseline
 
 ```env
-MINIMAL_MIN_BUY_LIMIT=0.10
-MINIMAL_MAX_BUY_LIMIT=0.85
+MINIMAL_MAX_ASK=0.70
+MINIMAL_MIN_BUY_LIMIT=0.25
+MINIMAL_MAX_BUY_LIMIT=0.70
 MINIMAL_DECISION_MIN_TTE_US=45000000
 MINIMAL_USDC_PER_TRADE=1.01
-MINIMAL_ENTRY_SLIPPAGE=0.05
+MINIMAL_ENTRY_SLIPPAGE=0.03
 MINIMAL_STOP_LOSS_BPS=0
+MINIMAL_TAKE_PROFIT_BPS=1000
 MINIMAL_DECISION_MIN_EDGE=0.05
 MINIMAL_PROB_GAMMA_MOVE=0.5
 MINIMAL_PROB_SIGMA_FLOOR_USD=2.0
@@ -61,8 +129,9 @@ MINIMAL_PROB_SIGMA_SCALE=1.5
 MINIMAL_PROB_USE_LEGACY=false
 MINIMAL_LOG_LEVEL=INFO
 MINIMAL_ENTRY_ORDER_TYPE=FAK
-MINIMAL_EXIT_ORDER_TYPE=GTC
-MINIMAL_ALLOW_RESTING_ORDERS=true
+MINIMAL_EXIT_ORDER_TYPE=FAK
+MINIMAL_EXIT_FAK_ATTEMPTS=3
+MINIMAL_ALLOW_RESTING_ORDERS=false
 MINIMAL_MAX_CONCURRENT_POSITIONS=3
 MINIMAL_MAX_NOTIONAL_OVERRUN=0.01
 MINIMAL_MAX_NOTIONAL_OVERRUN_BPS=0
@@ -70,19 +139,15 @@ MINIMAL_MAX_NOTIONAL_OVERRUN_BPS=0
 
 ## Operating Model
 
-- **Entry orders: FAK** — speed matters for capturing edge before it vanishes.
-- **Exit orders: GTC** — sits on book waiting for take-profit target. Skipped taker costs.
-- **`MINIMAL_ALLOW_RESTING_ORDERS=true`** required for GTC exits.
-- **`deferExec: false`** set on every order body — explicit opt-out of Polymarket deferral.
-- **Max 3 concurrent positions** across all market scopes — prevents runaway entries.
-- **Multi-position exit**: `evaluate_exit` iterates all tracker positions, not just `state.position`. Each position is evaluated independently, but only ONE sell is submitted per tick (sequential single-flight exit).
-- **Stop-loss disabled** (`MINIMAL_STOP_LOSS_BPS=0`). Code skips the check when bps ≤ 0 — previously 0 bps meant "stop at entry price" which triggered from bid-ask spread.
-- **"not enough balance" cooldown**: exits that hit venue balance errors are suppressed for 2s to let Polymarket settlement complete. Polymarket confirms trades (user channel CONFIRMED) before tokens settle in wallet.
-- **SELL inventory = MATCHED** (immediately sellable, no CONFIRMED wait), floored to 0.01 share quantum.
-- **No full SDK `create_and_post_order()` on hot path** — pre-signed templates + fresh L2 headers.
-- **45-second no-entry window** enforced at template disarm AND decision gate layers.
-- **`MINIMAL_USDC_PER_TRADE >= 1.01`** — $1.00 serializes below venue minimum after rounding.
-- **Notional cap** — BUY sizes chosen by `canonical_buy_target_for_notional()` will not silently exceed `target_usdc + max_notional_overrun`. If no valid size satisfies both the venue minimum ($1.01 maker) and the notional cap, the armory rejects locally. No 400 round-trip.
-- **Signed-body validation** — `prepare_template()` inspects the serialized signed body for maker ≤2dp, taker ≤4dp, tick-aligned implied price, and price match before returning. No SDK rounding monkeypatch.
-- Stale GTC orders cancelled after 2s via `cancel_stale_orders` loop.
-- Shutdown cancels live orders before closing HTTP clients.
+- Entry orders are FAK.
+- Exit orders are FAK with multi-attempt bursts (`MINIMAL_EXIT_FAK_ATTEMPTS=3`).
+- No resting exit dependence. GTC/GTD exits are legacy behavior and should not be reintroduced.
+- `deferExec: false` is set on every order body.
+- Max positions means concurrent asset positions, not dollars or shares.
+- Sell inventory is WSS/user-channel tracker inventory floored to the tradable 0.01 share quantum.
+- Immediate take-profit burst uses the matched BUY HTTP response amount first, then WSS inventory updates normal exit sizing.
+- `MINIMAL_USDC_PER_TRADE` must stay at least `1.01`; `1.00` can serialize below venue minimum after rounding.
+- BUY size selection must remain notional-aware. It must not silently round up beyond `target_usdc + max_notional_overrun`.
+- Signed-body validation in `prepare_template()` is the final safety net for maker/taker precision and implied price tick/equality.
+- No SDK-global monkeypatching.
+- No docs/tests/artifacts on EC2 for live runs.

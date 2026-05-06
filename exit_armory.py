@@ -99,7 +99,9 @@ class ExitArmory:
             return False
         pending = self._pending
         if pending is not None and _same_exit(pending[0], decision):
-            return False
+            task = self._task
+            if task is not None and not task.done():
+                return False
         self._pending = (decision, int(quote_ts_ns))
         task = self._task
         if task is None or task.done():
@@ -147,7 +149,7 @@ class ExitArmory:
                         decision.reason,
                         exc,
                     )
-                    raise
+                    continue
                 prepared = _PreparedExit(decision=decision, template=template)
                 self._prepared = prepared
                 self._arm_prepared(prepared, quote_ts_ns=quote_ts_ns, quote_decision=decision)
@@ -177,7 +179,10 @@ class ExitArmory:
         self._engine.arm(
             decision.signal,
             prepared.template,
-            HotPathGuard(max_ask=Decimal("1"), min_bid=decision.limit_price, max_age_ns=self._max_quote_age_ns),
+            HotPathGuard(
+                max_age_ns=self._max_quote_age_ns,
+                allow_unconfirmed_sell=decision.reason == "immediate_take_profit",
+            ),
         )
 
 

@@ -1,6 +1,6 @@
 import time
 from dataclasses import dataclass
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 from typing import Any, Callable, Protocol
 
 from fast_order_submitter import FastOrderTemplate, extract_order_id
@@ -11,15 +11,9 @@ _DEC_ZERO = Decimal("0")
 _NS_PER_S = 1_000_000_000
 
 
-def _dec(raw: Any) -> Decimal:
-    if raw is None:
-        return _DEC_ZERO
-    if isinstance(raw, Decimal):
-        return raw
-    try:
-        return Decimal(str(raw))
-    except (InvalidOperation, TypeError, ValueError):
-        return _DEC_ZERO
+def _is_fak_no_match(response: dict[str, Any]) -> bool:
+    error = str(response.get("error") or response.get("errorMsg") or "").lower()
+    return "no orders found to match with fak order" in error
 
 
 class _Submitter(Protocol):
@@ -36,10 +30,8 @@ class QuoteSnapshot:
 
 @dataclass(frozen=True, slots=True)
 class HotPathGuard:
-    max_ask: Decimal
-    min_ask: Decimal = _DEC_ZERO
-    min_bid: Decimal = _DEC_ZERO
     max_age_ns: int = 0
+    allow_unconfirmed_sell: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -72,7 +64,6 @@ class HotPathEngine:
         "_in_flight_buy",
         "_in_flight_sell",
         "_fired",
-        "_active_buy_assets",
         "_exposure_scope",
         "_max_concurrent_positions",
     )
@@ -96,7 +87,6 @@ class HotPathEngine:
         self._in_flight_buy = False
         self._in_flight_sell = False
         self._fired: set[str] = set()
-        self._active_buy_assets: set[str] = set()
         self._exposure_scope: set[str] = set()
 
     def set_exposure_scope(self, token_ids: set[str] | frozenset[str]) -> None:
@@ -105,13 +95,10 @@ class HotPathEngine:
         # on_signal could use them).  Market rotation already calls
         # disarm_all() + armory.reset() separately.
         self._exposure_scope = {str(token_id) for token_id in token_ids if token_id}
-        if self._exposure_scope:
-            self._active_buy_assets.intersection_update(self._exposure_scope)
 
     def disarm_all(self) -> None:
         self._armed.clear()
         self._fired.clear()
-        self._active_buy_assets.clear()
 
     def arm(self, signal: str, template: FastOrderTemplate, guard: HotPathGuard) -> None:
         key = signal.upper()
@@ -159,7 +146,8 @@ class HotPathEngine:
             return HotPathResult(False, "quote_stale")
 
         if armed.side == "BUY" and self._tracker is not None:
-            # Count unique assets with active positions or pending entries.
+            # Max positions is WSS-authoritative: only tradable inventory from
+            # the user channel counts as an open position.
             # In a binary market (2 tokens), max_concurrent_positions
             # effectively means "how many sides can be entered."  Default 3
             # allows both YES and NO; set to 1 for single-side only.
@@ -171,11 +159,10 @@ class HotPathEngine:
                 owned, _entry = self._tracker.position_size_and_entry(aid)
                 if owned > 0:
                     open_assets.add(aid)
-            open_assets.update(aid for aid in self._active_buy_assets if not scope or aid in scope)
             for pending in self._tracker.pending_submits.values():
                 if pending.intent != "entry":
                     continue
-                if pending.status not in ("PENDING", "UNKNOWN", "CONFIRMED"):
+                if pending.status not in ("PENDING", "UNKNOWN"):
                     continue
                 if scope and pending.asset_id not in scope:
                     continue
@@ -188,15 +175,7 @@ class HotPathEngine:
             if template.token_id in open_assets:
                 return HotPathResult(False, "max_positions")
 
-        # BUY-side ask guards are intentionally disabled. The venue-side FAK
-        # limit price in the signed order body remains the authoritative cap.
-        # if armed.side == "BUY" and armed.guard.min_ask > 0 and quote.ask < armed.guard.min_ask:
-        #     return HotPathResult(False, "ask_below_guard")
-        # if armed.guard.max_ask > 0 and (quote.ask <= 0 or quote.ask > armed.guard.max_ask):
-        #     return HotPathResult(False, "ask_above_guard")
-        if armed.guard.min_bid > 0 and quote.bid < armed.guard.min_bid:
-            return HotPathResult(False, "bid_below_guard")
-        if armed.side == "SELL":
+        if armed.side == "SELL" and not armed.guard.allow_unconfirmed_sell:
             if self._tracker is None or not self._tracker.can_sell(template.token_id, armed.size):
                 return HotPathResult(False, "insufficient_sellable")
 
@@ -226,7 +205,7 @@ class HotPathEngine:
                 # otherwise a server-accepted order would become invisible
                 # inventory. Instead mark UNKNOWN and conservatively treat
                 # the cycle as if the order were live.
-                self._handle_unknown_submit(armed, template, submit_id, start_ns, repr(exc))
+                self._handle_unknown_submit(armed, submit_id, repr(exc))
                 keep_armed_after_attempt = True
                 end_ns = self._now_ns()
                 return HotPathResult(
@@ -246,16 +225,6 @@ class HotPathEngine:
                             now_ts=self._now_ns() / _NS_PER_S,
                         )
                     self._fired.add(key)
-                    if armed.side == "BUY":
-                        self._active_buy_assets.add(template.token_id)
-                    elif armed.side == "SELL":
-                        self._active_buy_assets.discard(template.token_id)
-                    matched_response = self._record_matched_response_fill(
-                        armed,
-                        template,
-                        response,
-                        order_id,
-                    )
                     end_ns = self._now_ns()
                     return HotPathResult(
                         submitted=True,
@@ -264,13 +233,7 @@ class HotPathEngine:
                         latency_ns=max(0, end_ns - start_ns),
                         response=response,
                     )
-                self._handle_unknown_submit(
-                    armed,
-                    template,
-                    submit_id,
-                    start_ns,
-                    "accepted_missing_order_id",
-                )
+                self._handle_unknown_submit(armed, submit_id, "accepted_missing_order_id")
                 keep_armed_after_attempt = True
                 end_ns = self._now_ns()
                 return HotPathResult(
@@ -283,9 +246,7 @@ class HotPathEngine:
             if classification == "unknown":
                 self._handle_unknown_submit(
                     armed,
-                    template,
                     submit_id,
-                    start_ns,
                     str(response.get("error") or response.get("_http_status") or "unknown"),
                 )
                 keep_armed_after_attempt = True
@@ -299,8 +260,8 @@ class HotPathEngine:
                 )
 
             # Definitive server rejection.
-            if armed.side == "BUY":
-                self._active_buy_assets.discard(template.token_id)
+            if armed.side == "BUY" and _is_fak_no_match(response):
+                keep_armed_after_attempt = True
             if self._tracker is not None and submit_id:
                 self._tracker.mark_submit_failed(
                     submit_id,
@@ -317,51 +278,18 @@ class HotPathEngine:
         finally:
             if attempted_submit and not keep_armed_after_attempt:
                 self.disarm(key)
-            # If we reach finally without having added to _active_buy_assets
-            # (exception or unknown path), the BUY didn't create a real position
-            # so it must not count against the concurrency cap.
-            if armed.side == "BUY" and not attempted_submit:
-                self._active_buy_assets.discard(template.token_id)
             if armed.side == "BUY":
                 self._in_flight_buy = False
             else:
                 self._in_flight_sell = False
 
-    def _handle_unknown_submit(
-        self,
-        armed: ArmedTemplate,
-        template: FastOrderTemplate,
-        submit_id: str,
-        start_ns: int,
-        error: str,
-    ) -> None:
+    def _handle_unknown_submit(self, armed: ArmedTemplate, submit_id: str, error: str) -> None:
         if self._tracker is not None and submit_id:
             self._tracker.mark_submit_unknown(submit_id, error=error)
         if armed.side == "BUY":
             return
         # FAK exits are allowed to retry aggressively. Inventory remains
         # WSS-authoritative; venue balance checks reject redundant attempts.
-
-    def _record_matched_response_fill(
-        self,
-        armed: ArmedTemplate,
-        template: FastOrderTemplate,
-        response: dict[str, Any],
-        order_id: str,
-    ) -> bool:
-        if not order_id:
-            return False
-        status = str(response.get("status") or "").strip().upper()
-        if status not in {"MATCHED", "FILLED"}:
-            return False
-        # Inventory accounting is WSS-authoritative. Do not apply local
-        # submit response fills to avoid dual-source race double-counting.
-        return True
-
-
-# UNCALLED: remnant of removed buy-cycle lock.  Kept for reference.
-def _accepted_submit(response: dict[str, Any], order_id: str) -> bool:
-    return _classify_submit_response(response) == "accepted" and bool(order_id)
 
 
 def _classify_submit_response(response: dict[str, Any]) -> str:

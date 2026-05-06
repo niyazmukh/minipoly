@@ -15,6 +15,7 @@ from py_clob_client.clob_types import ApiCreds
 from auth import L2Auth
 from config import BotConfig
 from http_client import CLOBHttpClient
+from log_utils import configure_logging, env_flag, full_trace_enabled, log_level, print_log
 from utils import maybe_json_list, parse_gamma_iso8601_to_unix
 
 WS_URL = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
@@ -54,17 +55,6 @@ class MarketContext:
 
 WebSocketConn = Any
 EventCallback = Callable[[dict[str, Any]], object]
-
-
-def _safe_print(line: str) -> None:
-    try:
-        print(line)
-    except Exception:
-        try:
-            sys.stdout.buffer.write((line + "\n").encode("utf-8", errors="replace"))
-            sys.stdout.buffer.flush()
-        except Exception:
-            pass
 
 
 def _to_events(msg: Any) -> list[dict[str, Any]]:
@@ -293,7 +283,7 @@ def _make_inactive_event(reason: str) -> dict[str, Any]:
 
 async def _emit_context_event(reason: str, ctx: MarketContext, on_event: EventCallback | None) -> None:
     if on_event is None:
-        _safe_print(
+        print_log(
             f"[context:{reason}] slug={ctx.slug} conditionId={ctx.condition_id} "
             f"yes={ctx.yes_token_id} no={ctx.no_token_id} strike={ctx.strike} end_ts={ctx.end_ts}"
         )
@@ -305,7 +295,7 @@ async def _emit_context_event(reason: str, ctx: MarketContext, on_event: EventCa
 
 async def _emit_inactive_event(reason: str, on_event: EventCallback | None) -> None:
     if on_event is None:
-        _safe_print(f"[market_inactive:{reason}]")
+        print_log(f"[market_inactive:{reason}]")
         return
     result = on_event(_make_inactive_event(reason))
     if asyncio.iscoroutine(result):
@@ -314,13 +304,13 @@ async def _emit_inactive_event(reason: str, on_event: EventCallback | None) -> N
 
 def _emit_status(line: str, *, on_event: EventCallback | None = None) -> None:
     if on_event is None:
-        _safe_print(line)
+        print_log(line)
 
 
 async def _dispatch_event(ev: dict[str, Any], on_event: EventCallback | None) -> None:
     if on_event is None:
-        _safe_print(f"\n[event_type={_event_type(ev)}]")
-        _safe_print(orjson.dumps(ev, option=orjson.OPT_INDENT_2).decode("utf-8"))
+        print_log(f"\n[event_type={_event_type(ev)}]")
+        print_log(orjson.dumps(ev, option=orjson.OPT_INDENT_2).decode("utf-8"))
         return
     result = on_event(ev)
     if asyncio.iscoroutine(result):
@@ -387,8 +377,15 @@ async def _recv_loop(
     on_event: EventCallback | None,
 ) -> None:
     slug_prefix = cfg.market_slug_fmt.split("{ts}")[0]
+    log_raw = full_trace_enabled() or env_flag("MINIMAL_LOG_EVERY_MARKET_WS_MESSAGE", False)
     while True:
         raw = await ws.recv()
+        if log_raw:
+            if isinstance(raw, bytes):
+                raw_text = raw.decode("utf-8", errors="replace")
+            else:
+                raw_text = str(raw)
+            print_log(f"market_ws_raw recv_us={time.time_ns() // 1000} bytes={len(raw_text)} raw={raw_text}")
         if isinstance(raw, bytes):
             if raw == b"PONG":
                 continue
@@ -501,20 +498,20 @@ async def listen_forever(
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            _safe_print(f"ws disconnected: {exc!r}; reconnecting in {backoff:.1f}s")
+            print_log(f"ws disconnected: {exc!r}; reconnecting in {backoff:.1f}s")
             await _emit_inactive_event("disconnected", on_event)
             await asyncio.sleep(backoff)
             backoff = min(10.0, backoff * 1.8)
 
 
 async def _async_main() -> None:
-    logging.basicConfig(level=logging.INFO)
+    configure_logging(log_level("INFO"))
     os.chdir(MINIMAL_ROOT)
     load_dotenv(SCRIPT_ENV_FILE, override=True)
     try:
         cfg = BotConfig.from_env()
     except RuntimeError as exc:
-        _safe_print(f"config error: {exc}")
+        print_log(f"config error: {exc}")
         raise SystemExit(2) from exc
 
     dummy_creds = ApiCreds(api_key="DUMMY", api_secret="AA", api_passphrase="DUMMY")

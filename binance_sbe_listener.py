@@ -4,7 +4,6 @@ import gc
 import inspect
 import os
 import struct
-import sys
 import time
 import urllib.parse
 import urllib.request
@@ -17,6 +16,7 @@ import websockets
 from dotenv import load_dotenv
 
 from binance_signal_engine import BinanceTick
+from log_utils import configure_logging, env_flag, full_trace_enabled, log_level, print_log
 
 TickFieldsCallback = Callable[[int, int, float, float, float, float], object]
 
@@ -89,17 +89,6 @@ class RuntimeConfig:
     reconnect_max_s: float
     reconnect_factor: float
     disable_gc: bool
-
-
-def _safe_print(line: str) -> None:
-    try:
-        print(line)
-    except Exception:
-        try:
-            sys.stdout.buffer.write((line + "\n").encode("utf-8", errors="replace"))
-            sys.stdout.buffer.flush()
-        except Exception:
-            pass
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -392,7 +381,7 @@ def _consume_callback_task(task: asyncio.Task, tasks: set[asyncio.Task]) -> None
     except asyncio.CancelledError:
         return
     if exc is not None:
-        _safe_print(f"callback_error={exc!r}")
+        print_log(f"callback_error={exc!r}")
 
 
 def _dispatch_callback_result(result: object, tasks: set[asyncio.Task]) -> None:
@@ -470,6 +459,7 @@ async def _consume_best_bid_ask(
     ticks = 0
     last_update_id = 0
     callback_tasks: set[asyncio.Task] = set()
+    log_every_tick = full_trace_enabled() or env_flag("MINIMAL_LOG_EVERY_BINANCE_TICK", False)
 
     try:
         while True:
@@ -504,6 +494,25 @@ async def _consume_best_bid_ask(
             bid_qty = int(body[bid_qty_idx])
             ask_price = int(body[ask_price_idx])
             ask_qty = int(body[ask_qty_idx])
+
+            if log_every_tick:
+                now_us = time.time_ns() // 1000
+                bid_f = _scaled_to_float(bid_price, price_exp)
+                ask_f = _scaled_to_float(ask_price, price_exp)
+                bid_qty_f = _scaled_to_float(bid_qty, qty_exp)
+                ask_qty_f = _scaled_to_float(ask_qty, qty_exp)
+                print_log(
+                    "binance_tick"
+                    + f" event_time_us={event_time_us}"
+                    + f" recv_us={now_us}"
+                    + f" lag_us={now_us - event_time_us}"
+                    + f" tick={ticks}"
+                    + f" upd={update_id}"
+                    + f" bid={bid_f:.8f}"
+                    + f" ask={ask_f:.8f}"
+                    + f" bid_qty={bid_qty_f:.8f}"
+                    + f" ask_qty={ask_qty_f:.8f}"
+                )
 
             if on_tick_fields is not None:
                 bid_f = _scaled_to_float(bid_price, price_exp)
@@ -549,7 +558,7 @@ async def _consume_best_bid_ask(
                 symbol = _decode_symbol(view, payload_offset + block_length, spec.symbol_len_bytes)
             symbol_txt = f" symbol={symbol}" if symbol else ""
 
-            _safe_print(
+            print_log(
                 "tick="
                 + str(ticks)
                 + f" lag_us={lag_us}"
@@ -591,7 +600,7 @@ async def listen_forever(
                 open_timeout=cfg.open_timeout_s,
                 close_timeout=cfg.close_timeout_s,
             ) as ws:
-                _safe_print(
+                print_log(
                     f"connected ws={cfg.ws_url} template_id={spec.template_id} "
                     f"schema_id={spec.schema_id} schema_version={spec.schema_version}"
                 )
@@ -600,7 +609,7 @@ async def listen_forever(
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            _safe_print(f"listener_error={exc!r}; reconnecting_in={backoff:.2f}s")
+            print_log(f"listener_error={exc!r}; reconnecting_in={backoff:.2f}s")
             await asyncio.sleep(backoff)
             backoff = min(cfg.reconnect_max_s, max(cfg.reconnect_min_s, backoff * cfg.reconnect_factor))
 
@@ -622,11 +631,11 @@ async def _async_main(args: argparse.Namespace) -> None:
     cfg = _resolve_config(args)
     spec = _compile_schema(cfg.schema_url, cfg.message_name)
 
-    _safe_print(
+    print_log(
         f"schema_url={spec.schema_url} message={spec.message_name} template_id={spec.template_id} "
         f"root_size={spec.root_struct.size} header_size={spec.header_struct.size}"
     )
-    _safe_print("root_fields=" + ", ".join(spec.root_index.keys()))
+    print_log("root_fields=" + ", ".join(spec.root_index.keys()))
 
     if args.dry_run:
         return
@@ -640,11 +649,12 @@ async def _async_main(args: argparse.Namespace) -> None:
 
 if __name__ == "__main__":
     load_dotenv(SCRIPT_ENV_FILE, override=True)
+    configure_logging(log_level("INFO"))
     parsed_args = _parse_args()
     try:
         asyncio.run(_async_main(parsed_args))
     except KeyboardInterrupt:
         pass
     except RuntimeError as exc:
-        _safe_print(f"config_error: {exc}")
+        print_log(f"config_error: {exc}")
         raise SystemExit(2) from exc

@@ -41,7 +41,7 @@ async def _run_once(size: Decimal) -> ProbeResult:
     tracker = LocalOrderTracker()
     engine = HotPathEngine(submitter=_StubSubmitter(), tracker=tracker, now_ns=time.perf_counter_ns)
     engine.set_exposure_scope({"yes", "no"})
-    engine.arm("YES", _template("entry", "yes", "BUY", size), HotPathGuard(max_ask=Decimal("1")))
+    engine.arm("YES", _template("entry", "yes", "BUY", size), HotPathGuard())
     engine.update_quote("yes", bid=Decimal("0.49"), ask=Decimal("0.50"), ts_ns=time.perf_counter_ns())
 
     buy_start = time.perf_counter_ns()
@@ -62,7 +62,7 @@ async def _run_once(size: Decimal) -> ProbeResult:
                 "status": "MATCHED",
             }
         )
-    engine.arm("EXIT", _template("exit", "yes", "SELL", size), HotPathGuard(max_ask=Decimal("1"), min_bid=Decimal("0.01")))
+    engine.arm("EXIT", _template("exit", "yes", "SELL", size), HotPathGuard())
     engine.update_quote("yes", bid=Decimal("0.51"), ask=Decimal("0.52"), ts_ns=time.perf_counter_ns())
 
     sell_start = time.perf_counter_ns()

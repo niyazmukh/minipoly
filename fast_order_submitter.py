@@ -37,6 +37,7 @@ PRICE_TICK = Decimal("0.01")
 SIZE_STEP = Decimal("0.01")
 MAKER_AMOUNT_STEP = Decimal("0.01")
 TAKER_AMOUNT_STEP = Decimal("0.0001")
+TOKEN_AMOUNT_SCALE = Decimal("1000000")
 
 
 def _dec(value) -> Decimal:
@@ -67,7 +68,7 @@ def canonical_order_params(*, side: str, price, size, tick: Decimal = PRICE_TICK
 
     if side_u == "BUY":
         q_price = _ceil_to_step(price_d, tick)
-        q_size = _floor_to_step(size_d, TAKER_AMOUNT_STEP)
+        q_size = _floor_to_step(size_d, SIZE_STEP)
         q_size = _ceil_buy_size_for_amount_precision(q_price, q_size, price_step=tick)
     elif side_u == "SELL":
         q_price = _floor_to_step(price_d, tick)
@@ -94,7 +95,7 @@ def _buy_size_multiple_for_amount_precision(
     *,
     price_step: Decimal = PRICE_TICK,
     maker_step: Decimal = MAKER_AMOUNT_STEP,
-    taker_step: Decimal = TAKER_AMOUNT_STEP,
+    taker_step: Decimal = SIZE_STEP,
 ) -> Decimal:
     """Smallest positive share-size multiple such that:
     price * size is aligned to maker_step and size is aligned to taker_step.
@@ -116,7 +117,7 @@ def _floor_buy_size_for_amount_precision(
     *,
     price_step: Decimal = PRICE_TICK,
     maker_step: Decimal = MAKER_AMOUNT_STEP,
-    taker_step: Decimal = TAKER_AMOUNT_STEP,
+    taker_step: Decimal = SIZE_STEP,
 ) -> Decimal:
     """Largest size <= *size* such that price × size is aligned to *maker_step*."""
     multiple = _buy_size_multiple_for_amount_precision(
@@ -134,7 +135,7 @@ def _ceil_buy_size_for_amount_precision(
     *,
     price_step: Decimal = PRICE_TICK,
     maker_step: Decimal = MAKER_AMOUNT_STEP,
-    taker_step: Decimal = TAKER_AMOUNT_STEP,
+    taker_step: Decimal = SIZE_STEP,
 ) -> Decimal:
     """Smallest size >= *size* such that price × size is aligned to *maker_step*."""
     multiple = _buy_size_multiple_for_amount_precision(
@@ -389,13 +390,27 @@ def _assert_serialized_decimal_places(raw: object, max_decimals: int, label: str
         )
 
 
+def _amount_from_signed_body(raw: object) -> Decimal:
+    raw_s = str(raw)
+    try:
+        value = Decimal(raw_s)
+    except (InvalidOperation, ValueError, TypeError):
+        raise ValueError(f"signed_order_amount_not_decimal value={raw!r}") from None
+    # py-clob-client V1/V2 signed order bodies serialize makerAmount/takerAmount
+    # as integer token atoms (1e6 scale). Tests and mocks may still use decimal
+    # amounts directly, so only digit-only fields are scaled.
+    if raw_s.isdigit():
+        return value / TOKEN_AMOUNT_SCALE
+    return value
+
+
 def _extract_amounts(order: dict[str, object]) -> tuple[Decimal, Decimal]:
     maker_raw = order.get("makerAmount", order.get("maker_amount"))
     taker_raw = order.get("takerAmount", order.get("taker_amount"))
-    _assert_serialized_decimal_places(maker_raw, 2, "maker_amount")
-    _assert_serialized_decimal_places(taker_raw, 4, "taker_amount")
-    maker = _dec(maker_raw)
-    taker = _dec(taker_raw)
+    maker = _amount_from_signed_body(maker_raw)
+    taker = _amount_from_signed_body(taker_raw)
+    _assert_serialized_decimal_places(maker, 2, "maker_amount")
+    _assert_serialized_decimal_places(taker, 4, "taker_amount")
     if maker <= 0 or taker <= 0:
         raise ValueError(f"signed_order_non_positive_amounts maker={maker} taker={taker}")
     return maker, taker
@@ -422,8 +437,8 @@ async def prepare_template(
     name: str,
     token_id: str,
     side: str,
-    price: float,
-    size: float,
+    price: float | Decimal,
+    size: float | Decimal,
     tick: Decimal = PRICE_TICK,
     owner: str,
     order_type: str,
@@ -444,7 +459,7 @@ async def prepare_template(
         order_args_cls(
             token_id=token_id,
             price=float(price_d),
-            size=float(size_d),
+            size=size_d,
             side=side_u,
         ),
     )

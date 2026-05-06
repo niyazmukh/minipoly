@@ -2,6 +2,7 @@ import asyncio
 import logging
 import os
 import re
+import time
 from contextlib import suppress
 from pathlib import Path
 from typing import Any, Callable
@@ -10,6 +11,8 @@ import orjson
 import websockets
 from dotenv import load_dotenv
 from py_clob_client.client import ClobClient
+
+from log_utils import configure_logging, env_flag, full_trace_enabled, log_level, print_log
 
 # Official reference:
 # https://docs.polymarket.com/api-reference/wss/user
@@ -29,13 +32,6 @@ def _redact_api_key(api_key: str) -> str:
     return f"{key[:6]}...{key[-4:]}"
 
 
-def _safe_print(line: str) -> None:
-    try:
-        print(line)
-    except Exception:
-        pass
-
-
 def _to_events(msg: Any) -> list[dict[str, Any]]:
     if isinstance(msg, dict):
         return [msg]
@@ -47,8 +43,8 @@ def _to_events(msg: Any) -> list[dict[str, Any]]:
 async def _dispatch_user_event(ev: dict[str, Any], on_event: EventCallback | None) -> None:
     if on_event is None:
         et = str(ev.get("event_type") or ev.get("eventType") or ev.get("type") or "").lower()
-        _safe_print(f"\n[event_type={et}]")
-        _safe_print(orjson.dumps(ev, option=orjson.OPT_INDENT_2).decode("utf-8"))
+        print_log(f"\n[event_type={et}]")
+        print_log(orjson.dumps(ev, option=orjson.OPT_INDENT_2).decode("utf-8"))
         return
     result = on_event(ev)
     if asyncio.iscoroutine(result):
@@ -58,7 +54,7 @@ async def _dispatch_user_event(ev: dict[str, Any], on_event: EventCallback | Non
 def _emit_status(line: str, *, on_event: EventCallback | None = None) -> None:
     _LOG.warning("user_ws_status %s", line)
     if on_event is None:
-        _safe_print(line)
+        print_log(line)
 
 
 async def _app_ping_loop(ws) -> None:
@@ -130,6 +126,7 @@ async def listen_forever(
     if not (api_key and api_secret and api_passphrase):
         api_key, api_secret, api_passphrase = await _resolve_api_creds()
     ws_url = os.getenv("POLY_WS_USER", WS_USER_URL).strip() or WS_USER_URL
+    log_raw = full_trace_enabled() or env_flag("MINIMAL_LOG_EVERY_USER_WS_MESSAGE", False)
 
     backoff = 0.25
     while True:
@@ -168,6 +165,8 @@ async def listen_forever(
                             msg = raw.decode("utf-8", errors="ignore")
                         if isinstance(msg, str):
                             msg = msg.strip()
+                        if log_raw:
+                            print_log(f"user_ws_raw recv_us={time.time_ns() // 1000} bytes={len(str(msg))} raw={msg}")
                         if msg in ("PONG", "pong", "PING", "ping", ""):
                             continue
                         try:
@@ -188,14 +187,15 @@ async def listen_forever(
             raise
         except Exception as exc:
             _LOG.exception("user_ws_disconnected reconnecting_in=%.2fs", backoff)
-            _safe_print(f"user ws disconnected: {exc!r}; reconnecting in {backoff:.2f}s")
+            print_log(f"user ws disconnected: {exc!r}; reconnecting in {backoff:.2f}s")
             await asyncio.sleep(backoff)
             backoff = min(5.0, backoff * 1.7)
 
 
 if __name__ == "__main__":
+    configure_logging(log_level("INFO"))
     try:
         asyncio.run(listen_forever())
     except RuntimeError as exc:
-        _safe_print(f"config error: {exc}")
+        print_log(f"config error: {exc}")
         raise SystemExit(2) from exc

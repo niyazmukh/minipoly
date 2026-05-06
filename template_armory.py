@@ -12,7 +12,6 @@ from hot_path_engine import HotPathGuard
 
 
 _DEC_ZERO = Decimal("0")
-_DEC_ONE = Decimal("1")
 _CENT = Decimal("0.01")
 _MIN_CLOB_PRICE = Decimal("0.01")
 _MAX_CLOB_PRICE = Decimal("0.99")
@@ -54,7 +53,6 @@ class ArmoryConfig:
     max_buy_limit: Decimal = _MAX_CLOB_PRICE
     order_type: str = "FAK"
     post_only: bool = False
-    reprice_hysteresis_pct: Decimal = Decimal("0.002")
     max_quote_age_ns: int = 250_000_000
     max_notional_overrun: Decimal = Decimal("0.01")
     max_notional_overrun_bps: int = 0
@@ -80,13 +78,12 @@ class _PendingTarget:
 
 
 class TemplateArmory:
-    """Quote-driven entry-template armory with single-flight rearming.
+    """Quote-driven entry-template armory with single-flight signing.
 
     The market WS hot path calls `on_quote` for every quote update. We
-    synchronously update the engine quote (cheap), evaluate hysteresis, and
-    when a re-arm is required we coalesce all subsequent quote updates onto a
-    single background sign-and-arm task. The market WS loop never waits for
-    EIP-712 signing.
+    synchronously update the engine quote (cheap), compute the latest valid
+    target, and coalesce signing through one background task per side. The
+    market WS loop never waits for EIP-712 signing.
     """
 
     __slots__ = (
@@ -132,9 +129,38 @@ class TemplateArmory:
         # the freshest top-of-book on every event.
         now_ns = self._now_ns()
         self._engine.update_quote(token_id, bid=bid, ask=ask, ts_ns=now_ns)
-        if not signal or not token_id or ask <= 0 or tick <= 0:
+        next_target = self._target_from_quote(signal=signal, token_id=token_id, bid=bid, ask=ask, tick=tick)
+        if next_target is None:
             return False
 
+        key = signal.upper()
+        if self._is_current(key, next_target):
+            return False
+        if self._pending_target.get(key) == next_target:
+            return False
+
+        # Latest target wins. A signer already in flight will drain this slot
+        # when it finishes its current SDK call.
+        self._pending_target[key] = next_target
+        existing = self._inflight_task.get(key)
+        if existing is None or existing.done():
+            self._inflight_task[key] = asyncio.create_task(
+                self._sign_and_arm_loop(key),
+                name=f"template-armory-rearm-{key.lower()}",
+            )
+        return True
+
+    def _target_from_quote(
+        self,
+        *,
+        signal: str,
+        token_id: str,
+        bid: Decimal,
+        ask: Decimal,
+        tick: Decimal,
+    ) -> _PendingTarget | None:
+        if not signal or not token_id or ask <= 0 or tick <= 0:
+            return None
         # TODO(spread-surface): once market_feed maintains a live L2 book and
         # passes executable depth into the armory, compute volume-weighted
         # executable price for the intended size.  SF2 (Dubach 2026) shows L1
@@ -143,7 +169,7 @@ class TemplateArmory:
         min_buy_limit = max(_MIN_CLOB_PRICE, self._cfg.min_buy_limit)
         max_buy_limit = min(_MAX_CLOB_PRICE, self._cfg.max_buy_limit)
         if buy_limit < min_buy_limit or buy_limit > max_buy_limit:
-            return False
+            return None
         try:
             target = canonical_buy_target_for_notional(
                 price=buy_limit,
@@ -156,39 +182,31 @@ class TemplateArmory:
             )
         except ValueError as exc:
             _LOG.debug("template_armory_buy_target_rejected signal=%s error=%s", signal, exc)
-            return False
-
-        canonical_buy_limit = target.price
-        canonical_size = target.size
-
-        key = signal.upper()
-        prev = self._armed.get(key)
-        if prev is not None and not self._should_rearm(prev, token_id, canonical_buy_limit, canonical_size, tick):
-            return False
-
-        # Record the latest desired canonical target for this signal; the
-        # in-flight background task will pick this up when it finishes the
-        # current sign.
-        self._pending_target[key] = _PendingTarget(
-            signal=key,
+            return None
+        return _PendingTarget(
+            signal=signal.upper(),
             token_id=token_id,
             bid=bid,
             ask=ask,
             tick=tick,
-            buy_limit=canonical_buy_limit,
-            size=canonical_size,
+            buy_limit=target.price,
+            size=target.size,
         )
-        existing = self._inflight_task.get(key)
-        if existing is None or existing.done():
-            self._inflight_task[key] = asyncio.create_task(
-                self._sign_and_arm_loop(key),
-                name=f"template-armory-rearm-{key.lower()}",
-            )
-        return True
+
+    def _is_current(self, key: str, target: _PendingTarget) -> bool:
+        prev = self._armed.get(key)
+        return (
+            prev is not None
+            and prev.token_id == target.token_id
+            and prev.tick == target.tick
+            and prev.buy_limit == target.buy_limit
+            and prev.size == target.size
+        )
 
     async def _sign_and_arm_loop(self, key: str) -> None:
-        # Drain the pending-target slot until no fresher target arrives. This
-        # gives single-flight semantics: at most one signing task per signal.
+        # Drain the pending-target slot until current. This gives single-flight
+        # semantics: at most one signing task per signal, with fresh targets
+        # replacing older targets while the SDK signs.
         try:
             while True:
                 target = self._pending_target.pop(key, None)
@@ -205,12 +223,6 @@ class TemplateArmory:
                     post_only=self._cfg.post_only,
                 )
                 guard = HotPathGuard(
-                    # Disable local BUY ask guard; FAK venue matching against
-                    # the signed limit price is the authority.
-                    # max_ask=target.buy_limit,
-                    # min_ask=max(_MIN_CLOB_PRICE, self._cfg.min_buy_limit),
-                    max_ask=_DEC_ZERO,
-                    min_ask=_DEC_ZERO,
                     max_age_ns=self._cfg.max_quote_age_ns,
                 )
                 if template.price != target.buy_limit or template.size != target.size:
@@ -224,6 +236,11 @@ class TemplateArmory:
                         template.size,
                     )
                     continue
+                newer = self._pending_target.get(key)
+                if newer is not None:
+                    if newer != target:
+                        continue
+                    self._pending_target.pop(key, None)
                 self._armed[key] = _ArmedState(
                     token_id=template.token_id,
                     buy_limit=template.price,
@@ -250,18 +267,3 @@ class TemplateArmory:
         key = signal.upper()
         self._armed.pop(key, None)
         self._pending_target.pop(key, None)
-
-    def _should_rearm(
-        self,
-        prev: _ArmedState,
-        token_id: str,
-        buy_limit: Decimal,
-        size: Decimal,
-        tick: Decimal,
-    ) -> bool:
-        if prev.token_id != token_id or prev.tick != tick or prev.size != size:
-            return True
-        if prev.buy_limit <= 0:
-            return True
-        rel = abs(buy_limit - prev.buy_limit) / prev.buy_limit
-        return rel >= self._cfg.reprice_hysteresis_pct

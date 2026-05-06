@@ -103,8 +103,6 @@ def test_exit_armory_arms_sell_template_with_bid_guard_and_fresh_quote() -> None
     assert template.token_id == "yes"
     assert template.price == Decimal("0.56")
     assert template.size == Decimal("7.5")
-    assert guard.min_bid == Decimal("0.56")
-    assert guard.max_ask == Decimal("1")
     assert guard.max_age_ns == 100_000_000
     assert engine.quotes[-1] == ("yes", Decimal("0.56"), Decimal("0.57"), 2_000)
 
@@ -250,3 +248,37 @@ def test_exit_armory_prepares_fresh_template_after_retire() -> None:
         b'{"sell":2}',
         b'{"sell":2}',
     ]
+
+
+def test_exit_armory_swallow_prepare_failure_in_background_task() -> None:
+    engine = _Engine()
+
+    async def _failing_build_template(**_kwargs) -> FastOrderTemplate:
+        raise ValueError("invalid price")
+
+    armory = ExitArmory(
+        engine=engine,
+        build_template=_failing_build_template,
+        owner="owner",
+        max_quote_age_ns=100_000_000,
+    )
+    decision = ExitDecision(
+        "SELL",
+        "prearm",
+        side="YES",
+        token_id="yes",
+        size=Decimal("1.29"),
+        limit_price=Decimal("0.01"),
+        bid=Decimal("0.01"),
+        ask=Decimal("0.02"),
+        order_type="FAK",
+    )
+
+    async def _run() -> None:
+        assert armory.prepare_exit(decision, quote_ts_ns=1_000) is True
+        await asyncio.sleep(0)
+        task = armory._task
+        assert task is None or not task.exception()
+
+    asyncio.run(_run())
+    assert engine.armed == []

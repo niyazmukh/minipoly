@@ -67,6 +67,7 @@ def test_build_order_body_is_stable_and_compact() -> None:
 
 
 def test_build_order_body_serializes_v2_signed_order_for_buy_and_sell() -> None:
+    pytest.importorskip("py_clob_client_v2")
     from py_clob_client_v2.order_utils.model.order_data_v2 import SignedOrderV2
     from py_clob_client_v2.order_utils.model.side import Side
     from py_clob_client_v2.order_utils.model.signature_type_v2 import SignatureTypeV2
@@ -379,7 +380,29 @@ def test_prepare_template_uses_market_tick_instead_of_global_cent_tick() -> None
         assert template.size == Decimal("910.0000")
         assert template.implied_price == Decimal("0.011")
         assert clob._calls[0]["price"] == 0.011
-        assert clob._calls[0]["size"] == 910.0
+        assert clob._calls[0]["size"] == Decimal("910.0000")
+
+    asyncio.run(_run())
+
+
+def test_prepare_template_passes_price_as_float_and_size_as_decimal() -> None:
+    async def _run() -> None:
+        clob = _MockClobClient(maker_amount="1.29", taker_amount="0.0129")
+        template = await prepare_template(
+            clob,
+            name="exit-expiry_ripcord",
+            token_id="yes",
+            side="SELL",
+            price=Decimal("0.01"),
+            size=Decimal("1.29"),
+            owner="owner",
+            order_type="FAK",
+            post_only=False,
+        )
+
+        assert template.price == Decimal("0.01")
+        assert clob._calls[0]["price"] == 0.01
+        assert clob._calls[0]["size"] == Decimal("1.29")
 
     asyncio.run(_run())
 
@@ -428,10 +451,31 @@ def test_prepare_template_rejects_buy_body_with_serialized_maker_over_2dp() -> N
     asyncio.run(_run())
 
 
+def test_prepare_template_rejects_atomic_buy_body_with_scaled_maker_over_2dp() -> None:
+    """V2 signed bodies use 1e6 atom strings; 1016000 means 1.016000 USDC."""
+
+    async def _run() -> None:
+        clob = _MockClobClient(maker_amount="1016000", taker_amount="1270000")
+        with pytest.raises(ValueError, match="signed_order_maker_amount_too_many_decimals"):
+            await prepare_template(
+                clob,
+                name="entry-no",
+                token_id="no",
+                side="BUY",
+                price=Decimal("0.80"),
+                size=Decimal("1.27"),
+                owner="owner",
+                order_type="FAK",
+                post_only=False,
+            )
+
+    asyncio.run(_run())
+
+
 @pytest.mark.parametrize(
     "price,maker,taker",
     [
-        ("0.48", "9.99", "20.8125"),
+        ("0.48", "9.96", "20.75"),
         ("0.51", "9.69", "19.0000"),
         ("0.50", "10.00", "20.0000"),
     ],
@@ -552,8 +596,8 @@ def test_canonical_buy_size_is_amount_precision_aligned() -> None:
         assert _floor_to_step(maker, Decimal("0.01")) == maker, (
             f"BUY price={price_d} size={q_size} maker={maker} not 2dp-aligned"
         )
-        assert q_size == _floor_to_step(q_size, Decimal("0.0001")), (
-            f"BUY size={q_size} not 4dp-aligned"
+        assert q_size == _floor_to_step(q_size, Decimal("0.01")), (
+            f"BUY size={q_size} not SDK limit-order 2dp-aligned"
         )
         assert q_price == _floor_to_step(q_price, Decimal("0.01")), (
             f"BUY price={q_price} not tick-aligned"
@@ -575,7 +619,7 @@ def test_canonical_buy_size_is_amount_precision_aligned() -> None:
     [
         (Decimal("0.67"), Decimal("1.0000")),
         (Decimal("0.51"), Decimal("1.0000")),
-        (Decimal("0.48"), Decimal("0.0625")),
+        (Decimal("0.48"), Decimal("0.25")),
         (Decimal("0.50"), Decimal("0.0200")),
     ],
 )
@@ -590,7 +634,7 @@ def test_buy_size_multiple_for_amount_precision(price: Decimal, expected_multipl
 @pytest.mark.parametrize(
     "price,raw,expected_floor,expected_ceil",
     [
-        (Decimal("0.48"), Decimal("20.84"), Decimal("20.8125"), Decimal("20.8750")),
+        (Decimal("0.48"), Decimal("20.84"), Decimal("20.75"), Decimal("21.00")),
         (Decimal("0.51"), Decimal("19.61"), Decimal("19.0000"), Decimal("20.0000")),
         (Decimal("0.50"), Decimal("20.00"), Decimal("20.0000"), Decimal("20.0000")),
         (Decimal("0.67"), Decimal("1.51"), Decimal("1.0000"), Decimal("2.0000")),
@@ -612,7 +656,7 @@ def test_buy_floor_ceil_for_amount_precision(
 @pytest.mark.parametrize(
     "price,target_usdc,expected_size,expected_maker,expected_policy",
     [
-        (Decimal("0.48"), Decimal("10"), Decimal("20.8125"), Decimal("9.99"), "floor"),
+        (Decimal("0.48"), Decimal("10"), Decimal("20.75"), Decimal("9.9600"), "floor"),
         (Decimal("0.51"), Decimal("10"), Decimal("19.0000"), Decimal("9.69"), "floor"),
         (Decimal("0.50"), Decimal("10"), Decimal("20.0000"), Decimal("10.00"), "ceil"),
         (Decimal("0.51"), Decimal("1.01"), Decimal("2.0000"), Decimal("1.02"), "ceil"),

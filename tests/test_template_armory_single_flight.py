@@ -44,7 +44,7 @@ def test_on_quote_does_not_block_on_signing() -> None:
         latch = asyncio.Event()
         signed: list[str] = []
         armory = TemplateArmory(
-            cfg=ArmoryConfig(usdc_per_trade=Decimal("10"), reprice_hysteresis_pct=Decimal("0.0")),
+            cfg=ArmoryConfig(usdc_per_trade=Decimal("10")),
             engine=engine,
             build_template=_build_factory(latch, signed),
             now_ns=lambda: 1,
@@ -88,7 +88,7 @@ def test_reset_cancels_inflight_tasks() -> None:
         latch = asyncio.Event()
         signed: list[str] = []
         armory = TemplateArmory(
-            cfg=ArmoryConfig(usdc_per_trade=Decimal("10"), reprice_hysteresis_pct=Decimal("0.0")),
+            cfg=ArmoryConfig(usdc_per_trade=Decimal("10")),
             engine=engine,
             build_template=_build_factory(latch, signed),
             now_ns=lambda: 1,
