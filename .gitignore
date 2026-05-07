@@ -26,6 +26,10 @@ NUL
 
 # generated artifacts (rebuildable)
 graphify-out/
+.local_pkgs/
+
+# local standalone probes / scratch scripts
+probe_buy_floor.py
 
 # docs (except README)
 docs/*
