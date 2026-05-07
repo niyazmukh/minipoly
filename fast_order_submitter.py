@@ -22,7 +22,6 @@ except ImportError:  # pragma: no cover - exercised only when optional v2 SDK is
 
 
 ORDER_PATH = "/order"
-CANCEL_ORDERS_PATH = "/orders"
 
 # Per-request timeout for FAK order submission. eu-west-1 → Polymarket US
 # RTT is ~300-400ms, so 2.0s gives headroom above p95 while still failing
@@ -227,7 +226,6 @@ def canonical_buy_target_for_notional(
     )
 
 
-# DUPLICATED: also in order_placer.py:56.  Consolidate if either file is refactored.
 def _decode_secret(secret: str) -> bytes:
     pad = "=" * (-len(secret) % 4)
     return base64.urlsafe_b64decode(secret + pad)
@@ -305,7 +303,6 @@ class FastOrderTemplate:
     price: Decimal
     size: Decimal
     body_bytes: bytes
-    implied_price: Decimal | None = None
 
     def __post_init__(self) -> None:
         if not self.body_bytes:
@@ -489,7 +486,6 @@ async def prepare_template(
         price=price_d,
         size=size_d,
         body_bytes=body,
-        implied_price=implied,
     )
 
 
@@ -528,24 +524,6 @@ class FastOrderSubmitter:
         except Exception as exc:
             return {"success": False, "_http_status": 0, "error": "transport_error", "detail": repr(exc)}
 
-    async def cancel_orders(self, order_ids: list[str]) -> Any:
-        if not order_ids:
-            return []
-        body = orjson.dumps(order_ids)
-        headers = self._signer.headers("DELETE", CANCEL_ORDERS_PATH, body)
-        try:
-            async with self._session.delete(CANCEL_ORDERS_PATH, data=body, headers=headers) as resp:
-                raw = await resp.read()
-                try:
-                    data = orjson.loads(raw)
-                except Exception:
-                    data = {"success": False, "raw": raw.decode("utf-8", errors="replace")}
-                if isinstance(data, dict):
-                    data["_http_status"] = resp.status
-                return data
-        except Exception as exc:
-            return {"success": False, "_http_status": 0, "error": "transport_error", "detail": repr(exc)}
-
 
 class DryRunOrderSubmitter:
     __slots__ = ("_session",)
@@ -563,6 +541,3 @@ class DryRunOrderSubmitter:
             "price": template.price,
             "size": template.size,
         }
-
-    async def cancel_orders(self, order_ids: list[str]) -> Any:
-        return {"success": True, "_http_status": 0, "dry_run": True, "cancelled": list(order_ids)}

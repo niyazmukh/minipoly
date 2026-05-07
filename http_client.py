@@ -1,6 +1,5 @@
 import logging
 import time
-from decimal import Decimal
 from typing import Any
 
 import aiohttp
@@ -8,7 +7,6 @@ import orjson
 
 from auth import L2Auth
 from config import BotConfig
-from utils import _DEC_ZERO, parse_decimal_amount
 
 
 class CLOBHttpClient:
@@ -62,43 +60,6 @@ class CLOBHttpClient:
                 return data if isinstance(data, dict) else {}
             except Exception:
                 return {}
-
-    async def dataapi_positions_abs_sum(self, user_address: str) -> tuple[Decimal, int]:
-        if not user_address:
-            return _DEC_ZERO, 0
-        url = "https://data-api.polymarket.com/positions"
-        try:
-            async with self._gamma.get(
-                url,
-                params={
-                    "user": user_address,
-                    "sizeThreshold": "0",
-                    "limit": "500",
-                },
-            ) as resp:
-                if resp.status != 200:
-                    raise RuntimeError(f"Data API positions check failed with HTTP {resp.status}")
-                payload = await resp.read()
-        except Exception:
-            raise
-
-        total_abs = _DEC_ZERO
-        non_zero = 0
-        try:
-            data = orjson.loads(payload)
-        except orjson.JSONDecodeError as exc:
-            raise RuntimeError("Data API positions check returned invalid JSON") from exc
-        if not isinstance(data, list):
-            raise RuntimeError("Data API positions check returned a non-list payload")
-        for row in data:
-            if not isinstance(row, dict):
-                continue
-            value = parse_decimal_amount(row.get("size"))
-            if value == 0:
-                continue
-            total_abs += abs(value)
-            non_zero += 1
-        return total_abs, non_zero
 
     async def clob_open_order_count(self) -> int:
         path = "/data/orders"

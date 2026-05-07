@@ -29,14 +29,11 @@ __pycache__/
 .pytest_cache/
 
 # Non-runtime corpus files
-docs/
 *.md
 *.txt
 *.sh
 requirements.txt
 AGENTS.md
 
-# Offline utilities and debug probes (not runtime)
-calibration_data_fetch.py
-cold_latency_probe.py
-order_placer.py
+.gitignore
+.graphifyignore

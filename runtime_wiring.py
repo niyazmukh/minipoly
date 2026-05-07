@@ -3,7 +3,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Awaitable, Callable, Protocol
 
-from basis_estimator import BasisEstimator
 from binance_signal_engine import BinanceSignalConfig
 from bot_orchestrator import MinimalBotOrchestrator
 from exit_armory import ExitArmory
@@ -36,10 +35,7 @@ class MinimalRuntime:
     state: MinimalRuntimeState
     tracker: LocalOrderTracker
     hot_path: HotPathEngine
-    entry_armory: TemplateArmory
-    exit_armory: ExitArmory
     orchestrator: MinimalBotOrchestrator
-    basis_estimator: BasisEstimator | None
 
 
 def _with_owner(build_template: BuildTemplate, owner: str) -> BuildTemplate:
@@ -62,7 +58,6 @@ def build_runtime(
     decision_cfg: SignalDecisionConfig,
     now_s: Callable[[], float],
     now_ns: Callable[[], int],
-    basis_estimator: BasisEstimator | None = None,
 ) -> MinimalRuntime:
     tracker = LocalOrderTracker(current_run_only=True)
     hot_path = HotPathEngine(
@@ -92,15 +87,11 @@ def build_runtime(
         signal_cfg=signal_cfg,
         decision_cfg=decision_cfg,
         now_s=now_s,
-        basis_estimator=basis_estimator,
     )
     orchestrator.configure_exit_policy(exit_cfg, exit_armory=exit_armory, tracker=tracker)
     return MinimalRuntime(
         state=state,
         tracker=tracker,
         hot_path=hot_path,
-        entry_armory=entry_armory,
-        exit_armory=exit_armory,
         orchestrator=orchestrator,
-        basis_estimator=basis_estimator,
     )

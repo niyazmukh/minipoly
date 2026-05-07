@@ -1,6 +1,5 @@
 import os
 from datetime import datetime, timezone
-from decimal import Decimal
 from typing import Any
 
 import orjson
@@ -8,7 +7,6 @@ import orjson
 
 _TRUE = {"1", "true", "yes", "y", "on", "t"}
 _FALSE = {"0", "false", "no", "n", "off", "f"}
-_DEC_ZERO = Decimal("0")
 
 
 def env_str(name: str, default: str = "", *, required: bool = False) -> str:
@@ -73,12 +71,3 @@ def parse_gamma_iso8601_to_unix(value: str) -> float:
         return datetime.fromisoformat(value).timestamp()
     except Exception:
         return datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc).timestamp()
-
-
-def parse_decimal_amount(raw: Any) -> Decimal:
-    if raw is None:
-        return _DEC_ZERO
-    try:
-        return Decimal(str(raw))
-    except Exception:
-        return _DEC_ZERO

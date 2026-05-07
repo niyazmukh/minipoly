@@ -17,14 +17,11 @@ class OpenPosition:
     token_id: str
     entry_price: Decimal
     size: Decimal
-    opened_ns: int
 
 
 @dataclass(frozen=True, slots=True)
 class ExitPolicyConfig:
     take_profit_bps: int = 1200
-    stop_loss_bps: int = 1800
-    max_hold_us: int = 0
     force_exit_tte_us: int = 10_000_000
     order_type: str = "FAK"
     signal: str = "EXIT"
@@ -54,10 +51,6 @@ def _hold(reason: str, position: OpenPosition | None = None) -> ExitDecision:
 
 def _target(entry: Decimal, bps: int) -> Decimal:
     return entry * (_DEC_ONE + (Decimal(int(bps)) / _BPS))
-
-
-def _floor(entry: Decimal, bps: int) -> Decimal:
-    return entry * (_DEC_ONE - (Decimal(int(bps)) / _BPS))
 
 
 def price_at_tick(price: Decimal, tick: Decimal) -> Decimal:
@@ -120,7 +113,6 @@ def decide_exit(
     quote: QuoteState | None,
     cfg: ExitPolicyConfig,
     *,
-    now_ns: int,
     tte_us: int,
     sellable_size: Decimal,
 ) -> ExitDecision:
@@ -134,8 +126,4 @@ def decide_exit(
     size = min(position.size, sellable_size)
     if tte_us <= cfg.force_exit_tte_us:
         return sell_decision("expiry_ripcord", position, quote, cfg, size)
-    if cfg.max_hold_us > 0 and (int(now_ns) - position.opened_ns) // 1000 >= cfg.max_hold_us:
-        return sell_decision("time_stop", position, quote, cfg, size)
-    if cfg.stop_loss_bps > 0 and quote.bid <= _floor(position.entry_price, cfg.stop_loss_bps):
-        return sell_decision("stop_loss", position, quote, cfg, size)
     return take_profit_decision(position, quote, cfg, size)

@@ -69,25 +69,6 @@ def _event_type(ev: dict[str, Any]) -> str:
     return str(ev.get("event_type") or ev.get("eventType") or "")
 
 
-# UNCALLED: never wired up.  Kept for reference.
-def _extract_event_asset_ids_into(ev: dict[str, Any], target: set[str]) -> None:
-    aid = ev.get("asset_id") or ev.get("assetId")
-    if aid is not None:
-        target.add(str(aid))
-    for key in ("assets_ids", "asset_ids"):
-        arr = ev.get(key)
-        if isinstance(arr, list):
-            for x in arr:
-                target.add(str(x))
-    pcs = ev.get("price_changes") or ev.get("priceChanges")
-    if isinstance(pcs, list):
-        for pc in pcs:
-            if isinstance(pc, dict):
-                paid = pc.get("asset_id") or pc.get("assetId")
-                if paid is not None:
-                    target.add(str(paid))
-
-
 def _event_targets_subscribed(ev: dict[str, Any], subscribed: set[str]) -> bool:
     aid = ev.get("asset_id") or ev.get("assetId")
     if aid is not None and str(aid) in subscribed:

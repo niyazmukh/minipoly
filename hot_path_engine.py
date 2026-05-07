@@ -62,8 +62,6 @@ class HotPathEngine:
         "_quotes",
         "_armed",
         "_in_flight_buy",
-        "_in_flight_sell",
-        "_fired",
         "_exposure_scope",
         "_max_concurrent_positions",
     )
@@ -85,8 +83,6 @@ class HotPathEngine:
         self._quotes: dict[str, QuoteSnapshot] = {}
         self._armed: dict[str, ArmedTemplate] = {}
         self._in_flight_buy = False
-        self._in_flight_sell = False
-        self._fired: set[str] = set()
         self._exposure_scope: set[str] = set()
 
     def set_exposure_scope(self, token_ids: set[str] | frozenset[str]) -> None:
@@ -98,7 +94,6 @@ class HotPathEngine:
 
     def disarm_all(self) -> None:
         self._armed.clear()
-        self._fired.clear()
 
     def arm(self, signal: str, template: FastOrderTemplate, guard: HotPathGuard) -> None:
         key = signal.upper()
@@ -108,12 +103,10 @@ class HotPathEngine:
             side=template.side.upper(),
             size=template.size,
         )
-        self._fired.discard(key)
 
     def disarm(self, signal: str) -> None:
         key = signal.upper()
         self._armed.pop(key, None)
-        self._fired.discard(key)
 
     def update_quote(self, token_id: str, *, bid: Decimal, ask: Decimal, ts_ns: int | None = None) -> None:
         self._quotes[token_id] = QuoteSnapshot(
@@ -128,12 +121,8 @@ class HotPathEngine:
         armed = self._armed.get(key)
         if armed is None:
             return HotPathResult(False, "not_armed")
-        if key in self._fired:
-            return HotPathResult(False, "already_fired")
         if armed.side == "BUY" and self._in_flight_buy:
             return HotPathResult(False, "buy_in_flight")
-        if armed.side == "SELL" and self._in_flight_sell:
-            return HotPathResult(False, "sell_in_flight")
 
         template = armed.template
         quote = self._quotes.get(template.token_id)
@@ -181,8 +170,6 @@ class HotPathEngine:
 
         if armed.side == "BUY":
             self._in_flight_buy = True
-        else:
-            self._in_flight_sell = True
         submit_id = ""
         if self._tracker is not None:
             submit_id = self._tracker.register_submit(
@@ -224,7 +211,6 @@ class HotPathEngine:
                             order_id,
                             now_ts=self._now_ns() / _NS_PER_S,
                         )
-                    self._fired.add(key)
                     end_ns = self._now_ns()
                     return HotPathResult(
                         submitted=True,
@@ -280,8 +266,6 @@ class HotPathEngine:
                 self.disarm(key)
             if armed.side == "BUY":
                 self._in_flight_buy = False
-            else:
-                self._in_flight_sell = False
 
     def _handle_unknown_submit(self, armed: ArmedTemplate, submit_id: str, error: str) -> None:
         if self._tracker is not None and submit_id:

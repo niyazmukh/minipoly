@@ -25,18 +25,15 @@ import binance_sbe_listener
 import market_ws
 import user_channel_ws
 from auth import L2Auth
-from basis_estimator import BasisEstimator, BasisEstimatorConfig
 from binance_signal_engine import BinanceSignalConfig
-from config import BotConfig
+from config import BotConfig, MinimalOrderConfig
 from exit_policy import ExitPolicyConfig
 from fast_order_submitter import DryRunOrderSubmitter, FastOrderSubmitter, HeaderSigner, prepare_template
 from http_client import CLOBHttpClient
 from log_utils import configure_logging, log_level
-from order_placer import MinimalOrderConfig, _env_float, _env_int
 from runtime_state import MinimalRuntimeState
 from runtime_wiring import MinimalRuntime, RuntimeWiringConfig, build_runtime
 from signal_decision import SignalDecisionConfig
-from signal_model import CalibratedSignalModel, load_calibrated_model
 from template_armory import ArmoryConfig
 
 
@@ -62,14 +59,8 @@ class LiveBot:
     api_key: str
     api_secret: str
     api_passphrase: str
-    basis_path: Path | None = None
 
     async def close(self) -> None:
-        if self.basis_path is not None and self.runtime.basis_estimator is not None:
-            try:
-                self.runtime.basis_estimator.save(self.basis_path)
-            except Exception:
-                pass
         await self.http.close()
         await self.session.close()
 
@@ -105,7 +96,7 @@ def _required_int_env(name: str) -> int:
 
 def _entry_boundary_config() -> tuple[Decimal, Decimal, int]:
     min_buy = _required_dec_env("MINIMAL_MIN_BUY_LIMIT")
-    max_buy = _dec_env("MINIMAL_MAX_BUY_LIMIT", os.getenv("MINIMAL_MAX_ASK", "0.60"))
+    max_buy = _dec_env("MINIMAL_MAX_BUY_LIMIT", "0.60")
     min_tte_us = _required_int_env("MINIMAL_DECISION_MIN_TTE_US")
     if min_buy <= 0:
         raise RuntimeError("MINIMAL_MIN_BUY_LIMIT must be > 0.")
@@ -123,14 +114,6 @@ def _bool_env(name: str, default: bool) -> bool:
     return raw in {"1", "true", "yes", "on"}
 
 
-def _order_type_env(name: str, default: str = "FAK") -> str:
-    raw = os.getenv(name, "").strip().upper()
-    order_type = raw or default or "FAK"
-    if order_type != "FAK":
-        raise RuntimeError(f"{name}={order_type} is disabled. Minimal runtime only supports FAK orders.")
-    return order_type
-
-
 def _dry_run_order_mode() -> bool:
     dry_run = _bool_env("MINIMAL_DRY_RUN_ORDERS", False)
     live_orders = _bool_env("POLY_ALLOW_LIVE_ORDERS", False)
@@ -144,42 +127,11 @@ def _dry_run_order_mode() -> bool:
     return False
 
 
-def _maybe_load_calibrated_model(path: Path, *, required: bool) -> CalibratedSignalModel | None:
-    """Load and validate the calibrated signal model file.
-
-    Returns None when MINIMAL_REQUIRE_CALIBRATED_MODEL=false and the file is
-    missing — this is the only path that lets cold plumbing tests run on a
-    machine with no calibrated artifact. In all other cases the model is
-    loaded, schema-checked, and returned for application to the runtime
-    decision/signal-engine configs.
-    """
-    if not required and not path.is_file():
-        return None
-    model = load_calibrated_model(path)
-    logging.getLogger("minimal_live_bot.calibration").warning(model.summary_line())
-    return model
-
-
-def _ensure_calibrated_model(path: Path, *, required: bool) -> None:
-    """Backwards-compatible wrapper used by tests; raises if required & missing."""
-    _maybe_load_calibrated_model(path, required=required)
-
-
 async def build_live_bot() -> LiveBot:
     load_dotenv(SCRIPT_ENV_FILE, override=True)
     dry_run_orders = _dry_run_order_mode()
 
-    signal_model_path = Path(os.getenv("MINIMAL_SIGNAL_MODEL_PATH", "").strip() or (
-        Path(__file__).resolve().parent / "state" / "signal_model.json"
-    ))
-    calibrated_model = _maybe_load_calibrated_model(
-        signal_model_path,
-        required=_bool_env("MINIMAL_REQUIRE_CALIBRATED_MODEL", True),
-    )
-
     order_cfg = MinimalOrderConfig.from_env()
-    if order_cfg.allow_untracked_sell:
-        raise RuntimeError("POLY_ALLOW_UNTRACKED_SELL must stay false for the autonomous runtime.")
 
     if order_cfg.funder:
         clob = ClobClient(
@@ -214,15 +166,15 @@ async def build_live_bot() -> LiveBot:
 
     session = aiohttp.ClientSession(
         base_url=order_cfg.host,
-        timeout=aiohttp.ClientTimeout(total=_env_float("POLY_HTTP_TIMEOUT_S", 3.0)),
+        timeout=aiohttp.ClientTimeout(total=_float_env("POLY_HTTP_TIMEOUT_S", 3.0)),
         raise_for_status=False,
         skip_auto_headers={"User-Agent"},
         connector=aiohttp.TCPConnector(
-            limit=_env_int("POLY_HTTP_CONN_LIMIT", 8),
-            limit_per_host=_env_int("POLY_HTTP_CONN_LIMIT_PER_HOST", 8),
-            ttl_dns_cache=_env_int("POLY_HTTP_DNS_TTL_S", 600),
+            limit=_int_env("POLY_HTTP_CONN_LIMIT", 8),
+            limit_per_host=_int_env("POLY_HTTP_CONN_LIMIT_PER_HOST", 8),
+            ttl_dns_cache=_int_env("POLY_HTTP_DNS_TTL_S", 600),
             use_dns_cache=True,
-            keepalive_timeout=_env_float("POLY_HTTP_KEEPALIVE_S", 75.0),
+            keepalive_timeout=_float_env("POLY_HTTP_KEEPALIVE_S", 75.0),
             enable_cleanup_closed=True,
             force_close=False,
         ),
@@ -258,17 +210,6 @@ async def build_live_bot() -> LiveBot:
             **kwargs,
         )
 
-    basis_cfg = BasisEstimatorConfig(
-        alpha=_float_env("MINIMAL_BASIS_EMA_ALPHA", 0.05),
-        mid_tol=_float_env("MINIMAL_BASIS_MID_TOL", 0.05),
-        min_tte_us=_int_env("MINIMAL_BASIS_MIN_TTE_US", 30_000_000),
-        seed_basis=_float_env("MINIMAL_BINANCE_BASIS_USD", 0.0),
-        seed_weight=1.0 if os.getenv("MINIMAL_BINANCE_BASIS_USD", "").strip() else 0.0,
-    )
-    basis_path = Path(os.getenv("MINIMAL_BASIS_STATE_PATH", "").strip() or (
-        Path(__file__).resolve().parent / "state" / "basis.json"
-    ))
-    basis_estimator = BasisEstimator.load(basis_path, basis_cfg)
     min_buy_limit, max_buy_limit, min_entry_tte_us = _entry_boundary_config()
 
     runtime = build_runtime(
@@ -286,7 +227,7 @@ async def build_live_bot() -> LiveBot:
             min_size=_dec_env("MINIMAL_MIN_SIZE", "0.01"),
             min_buy_limit=min_buy_limit,
             max_buy_limit=max_buy_limit,
-            order_type=_order_type_env("MINIMAL_ENTRY_ORDER_TYPE", "FAK"),
+            order_type="FAK",
             post_only=False,
             max_quote_age_ns=_int_env("MINIMAL_MAX_QUOTE_AGE_NS", 250_000_000),
             max_notional_overrun=_dec_env("MINIMAL_MAX_NOTIONAL_OVERRUN", "0.01"),
@@ -294,21 +235,15 @@ async def build_live_bot() -> LiveBot:
         ),
         exit_cfg=ExitPolicyConfig(
             take_profit_bps=_int_env("MINIMAL_TAKE_PROFIT_BPS", 1200),
-            stop_loss_bps=_int_env("MINIMAL_STOP_LOSS_BPS", 1800),
-            max_hold_us=_int_env("MINIMAL_MAX_HOLD_US", 0),
             force_exit_tte_us=_int_env("MINIMAL_FORCE_EXIT_TTE_US", 10_000_000),
             # Strict exit mode: exits are always FAK.
             order_type="FAK",
             fak_attempts=_int_env("MINIMAL_EXIT_FAK_ATTEMPTS", 3),
         ),
-        signal_cfg=_apply_signal_engine_overrides(_binance_signal_cfg(), calibrated_model),
-        decision_cfg=_apply_decision_overrides(
-            _entry_decision_cfg(min_buy_limit, max_buy_limit, min_entry_tte_us),
-            calibrated_model,
-        ),
+        signal_cfg=_binance_signal_cfg(),
+        decision_cfg=_entry_decision_cfg(min_buy_limit, max_buy_limit, min_entry_tte_us),
         now_s=time.time,
         now_ns=time.monotonic_ns,
-        basis_estimator=basis_estimator,
     )
     return LiveBot(
         runtime=runtime,
@@ -319,24 +254,7 @@ async def build_live_bot() -> LiveBot:
         api_key=api_key,
         api_secret=api_secret,
         api_passphrase=api_passphrase,
-        basis_path=basis_path,
     )
-
-
-def _apply_decision_overrides(
-    cfg: SignalDecisionConfig, model: CalibratedSignalModel | None
-) -> SignalDecisionConfig:
-    if model is None:
-        return cfg
-    return model.apply_to_decision(cfg)
-
-
-def _apply_signal_engine_overrides(
-    cfg: BinanceSignalConfig, model: CalibratedSignalModel | None
-) -> BinanceSignalConfig:
-    if model is None:
-        return cfg
-    return model.apply_to_signal_engine(cfg)
 
 
 def _binance_signal_cfg() -> BinanceSignalConfig:
@@ -350,7 +268,6 @@ def _binance_signal_cfg() -> BinanceSignalConfig:
         min_abs_ofi=_float_env("MINIMAL_SIGNAL_MIN_ABS_OFI", 1.0),
         min_imbalance=_float_env("MINIMAL_SIGNAL_MIN_IMBALANCE", 0.12),
         min_total_qty=_float_env("MINIMAL_SIGNAL_MIN_TOTAL_QTY", 0.000001),
-        signal_cooldown_us=_int_env("MINIMAL_SIGNAL_COOLDOWN_US", 1_000_000),
         ring_size=_int_env("MINIMAL_SIGNAL_RING_SIZE", 128),
     )
 
@@ -365,20 +282,14 @@ def _entry_decision_cfg(
         min_ask=float(min_buy_limit),
         max_quote_age_us=_int_env("MINIMAL_DECISION_MAX_QUOTE_AGE_US", 250_000),
         min_tte_us=min_entry_tte_us,
-        min_strength=_float_env("MINIMAL_DECISION_MIN_STRENGTH", 3.0),
         min_edge=_float_env("MINIMAL_DECISION_MIN_EDGE", 0.05),
         entry_slippage=float(_dec_env("MINIMAL_ENTRY_SLIPPAGE", "0")),
-        strength_price_scale=_float_env("MINIMAL_DECISION_STRENGTH_PRICE_SCALE", 0.03),
-        prob_alpha_ofi=_float_env("MINIMAL_PROB_ALPHA_OFI", 0.0),
-        prob_beta_imb=_float_env("MINIMAL_PROB_BETA_IMB", 0.0),
         prob_gamma_move=_float_env("MINIMAL_PROB_GAMMA_MOVE", 0.5),
         prob_sigma_scale=_float_env("MINIMAL_PROB_SIGMA_SCALE", 1.5),
         prob_sigma_floor_usd=_float_env("MINIMAL_PROB_SIGMA_FLOOR_USD", 2.0),
         prob_floor=_float_env("MINIMAL_PROB_FLOOR", 0.02),
         prob_ceil=_float_env("MINIMAL_PROB_CEIL", 0.98),
-        min_prob=_float_env("MINIMAL_PROB_MIN_PROB", 0.55),
         max_tte_us=_int_env("MINIMAL_PROB_MAX_TTE_US", 600_000_000),
-        use_legacy_fair=_bool_env("MINIMAL_PROB_USE_LEGACY", False),
     )
 
 
@@ -422,16 +333,6 @@ async def _unknown_submit_expiry_loop(runtime: _Runtime, interval_s: float, max_
         await asyncio.sleep(delay)
 
 
-async def _basis_save_loop(estimator, path: Path, interval_s: float) -> None:
-    delay = max(1.0, float(interval_s))
-    while True:
-        await asyncio.sleep(delay)
-        try:
-            estimator.save(path)
-        except Exception:
-            pass
-
-
 async def run_supervised(
     runtime: _Runtime,
     *,
@@ -441,8 +342,6 @@ async def run_supervised(
     exit_interval_s: float,
     unknown_submit_interval_s: float = 0.0,
     unknown_submit_max_age_s: float = 0.0,
-    basis_save_path: Path | None = None,
-    basis_save_interval_s: float = 0.0,
 ) -> None:
     orchestrator = runtime.orchestrator
     tasks = [
@@ -456,17 +355,6 @@ async def run_supervised(
             asyncio.create_task(
                 _unknown_submit_expiry_loop(runtime, unknown_submit_interval_s, unknown_submit_max_age_s),
                 name="minimal-unknown-submit-expiry",
-            )
-        )
-    if (
-        basis_save_path is not None
-        and basis_save_interval_s > 0
-        and getattr(runtime, "basis_estimator", None) is not None
-    ):
-        tasks.append(
-            asyncio.create_task(
-                _basis_save_loop(runtime.basis_estimator, basis_save_path, basis_save_interval_s),
-                name="minimal-basis-save",
             )
         )
     done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_EXCEPTION)
@@ -515,8 +403,6 @@ async def run_live() -> None:
             exit_interval_s=_float_env("MINIMAL_EXIT_INTERVAL_S", 0.05),
             unknown_submit_interval_s=_float_env("MINIMAL_UNKNOWN_SUBMIT_INTERVAL_S", 0.05),
             unknown_submit_max_age_s=_float_env("MINIMAL_PENDING_UNKNOWN_TIMEOUT_S", 2.0),
-            basis_save_path=bot.basis_path,
-            basis_save_interval_s=_float_env("MINIMAL_BASIS_SAVE_INTERVAL_S", 60.0),
         )
     finally:
         await bot.close()

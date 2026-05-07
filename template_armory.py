@@ -4,7 +4,7 @@ import asyncio
 import logging
 import time
 from dataclasses import dataclass
-from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR
+from decimal import Decimal, ROUND_CEILING
 from typing import Awaitable, Callable, Protocol
 
 from fast_order_submitter import FastOrderTemplate, canonical_buy_target_for_notional
@@ -34,14 +34,6 @@ def ceil_to_tick(value: Decimal, tick: Decimal) -> Decimal:
     if tick <= 0:
         return value
     return (value / tick).to_integral_value(rounding=ROUND_CEILING) * tick
-
-
-def floor_to_2dp(value: Decimal) -> Decimal:
-    return value.quantize(_CENT, rounding=ROUND_FLOOR)
-
-
-def ceil_to_2dp(value: Decimal) -> Decimal:
-    return value.quantize(_CENT, rounding=ROUND_CEILING)
 
 
 @dataclass(frozen=True, slots=True)

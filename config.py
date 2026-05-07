@@ -34,3 +34,28 @@ class BotConfig:
             binance_symbol=env_str("BINANCE_SYMBOL", "BTCUSDT").upper(),
             disable_gc=env_bool("DISABLE_GC", True),
         )
+
+
+@dataclass(slots=True)
+class MinimalOrderConfig:
+    host: str
+    chain_id: int
+    private_key: str
+    signature_type: int
+    funder: str
+
+    @staticmethod
+    def from_env() -> "MinimalOrderConfig":
+        if not env_bool("POLY_ALLOW_LIVE_ORDERS", False) and not env_bool("MINIMAL_DRY_RUN_ORDERS", False):
+            raise RuntimeError(
+                "Refusing to initialize live order client. Set POLY_ALLOW_LIVE_ORDERS=true "
+                "for live CLOB orders or MINIMAL_DRY_RUN_ORDERS=true for non-transactional smoke tests."
+            )
+        return MinimalOrderConfig(
+            host=env_str("POLY_CLOB_HOST", "https://clob.polymarket.com").strip()
+            or "https://clob.polymarket.com",
+            chain_id=env_int("POLY_CHAIN_ID", 137),
+            private_key=env_str("POLY_PK", required=True).strip(),
+            signature_type=env_int("POLY_SIG_TYPE", 0),
+            funder=env_str("POLY_FUNDER", "").strip(),
+        )

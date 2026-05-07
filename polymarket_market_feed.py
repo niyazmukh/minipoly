@@ -3,7 +3,7 @@ from __future__ import annotations
 from decimal import Decimal, InvalidOperation
 from typing import Any, Iterator, Protocol
 
-from runtime_state import DepthLevels, MinimalRuntimeState
+from runtime_state import MinimalRuntimeState
 
 
 _DEFAULT_TICK = Decimal("0.01")
@@ -35,7 +35,6 @@ async def apply_market_event(
             continue
         quote = state.update_quote(
             token_id, bid=item.bid, ask=item.ask, tick=item.tick,
-            bid_depth=item.bid_depth, ask_depth=item.ask_depth,
         )
         # The armory implementation is required to be effectively non-blocking
         # here (single-flight rearm scheduled internally). The await is
@@ -60,7 +59,7 @@ def _is_market_resolved(event: dict[str, Any], state: MinimalRuntimeState) -> bo
 
 
 class _QuoteItem:
-    __slots__ = ("token_id", "bid", "ask", "tick", "bid_depth", "ask_depth")
+    __slots__ = ("token_id", "bid", "ask", "tick")
 
     def __init__(
         self,
@@ -68,15 +67,11 @@ class _QuoteItem:
         bid: Decimal,
         ask: Decimal,
         tick: Decimal,
-        bid_depth: DepthLevels | None = None,
-        ask_depth: DepthLevels | None = None,
     ) -> None:
         self.token_id = token_id
         self.bid = bid
         self.ask = ask
         self.tick = tick
-        self.bid_depth = bid_depth
-        self.ask_depth = ask_depth
 
 
 def _iter_quote_items(event: dict[str, Any]) -> Iterator[_QuoteItem]:
@@ -110,12 +105,7 @@ def _item_from_book(raw: dict[str, Any]) -> _QuoteItem | None:
     tick = _dec(raw.get("tick_size") or raw.get("tickSize") or _DEFAULT_TICK)
     if bid <= 0 and ask <= 0:
         return None
-    bid_depth = _extract_depth(raw.get("bids"), reverse=True, max_levels=5)
-    ask_depth = _extract_depth(raw.get("asks"), reverse=False, max_levels=5)
-    return _QuoteItem(
-        token_id, bid, ask, tick if tick > 0 else _DEFAULT_TICK,
-        bid_depth=bid_depth, ask_depth=ask_depth,
-    )
+    return _QuoteItem(token_id, bid, ask, tick if tick > 0 else _DEFAULT_TICK)
 
 
 def _best_book_side(levels: Any, *, reverse: bool) -> Decimal:
@@ -134,22 +124,6 @@ def _best_book_side(levels: Any, *, reverse: bool) -> Decimal:
         if best is None or (reverse and price > best) or (not reverse and price < best):
             best = price
     return best if best is not None else Decimal("0")
-
-
-def _extract_depth(levels: Any, *, reverse: bool, max_levels: int) -> DepthLevels:
-    """Extract (price, size) pairs from book side, sorted and truncated."""
-    if not isinstance(levels, list):
-        return ()
-    result: list[tuple[Decimal, Decimal]] = []
-    for level in levels:
-        if not isinstance(level, dict):
-            continue
-        price = _dec(level.get("price") or 0)
-        size = _dec(level.get("size") or level.get("qty") or 0)
-        if price > 0 and size > 0:
-            result.append((price, size))
-    result.sort(key=lambda x: x[0], reverse=reverse)
-    return tuple(result[:max_levels])
 
 
 def _item_from_dict(raw: dict[str, Any]) -> _QuoteItem | None:

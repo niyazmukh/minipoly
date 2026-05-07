@@ -26,13 +26,7 @@ class BinanceSignalConfig:
     min_abs_ofi: float = 1.0
     min_imbalance: float = 0.12
     min_total_qty: float = 0.000001
-    signal_cooldown_us: int = 1_000_000
     ring_size: int = 128
-    # When true, the cooldown applies across YES/NO flips so a fast
-    # microprice oscillation cannot fire YES -> NO -> YES inside the
-    # cooldown window. Default false preserves the legacy same-side
-    # behavior pending calibration of the asymmetric trade-off.
-    cooldown_side_agnostic: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,10 +37,6 @@ class BinanceSignal:
     update_id: int
     microprice: float
     move: float
-    ofi: float
-    imbalance: float
-    spread: float
-    strength: float
     sigma_px: float = 0.0
     strike: float = 0.0
 
@@ -54,8 +44,6 @@ class BinanceSignal:
 @dataclass(frozen=True, slots=True)
 class BinanceSignalSnapshot:
     ticks: int
-    last_event_time_us: int
-    last_update_id: int
     last_microprice: float
     last_ofi: float
     last_imbalance: float
@@ -90,8 +78,6 @@ class BinanceSignalEngine:
         "_last_microprice",
         "_last_ofi",
         "_last_imbalance",
-        "_last_signal_side",
-        "_last_signal_event_us",
         "stats",
     )
 
@@ -112,9 +98,7 @@ class BinanceSignalEngine:
             min_abs_ofi=float(cfg.min_abs_ofi),
             min_imbalance=float(cfg.min_imbalance),
             min_total_qty=max(0.0, float(cfg.min_total_qty)),
-            signal_cooldown_us=max(0, int(cfg.signal_cooldown_us)),
             ring_size=ring_size,
-            cooldown_side_agnostic=bool(cfg.cooldown_side_agnostic),
         )
         self._now_us = now_us if now_us is not None else _time_us
         self._event_times = [0] * ring_size
@@ -131,15 +115,11 @@ class BinanceSignalEngine:
         self._last_microprice = 0.0
         self._last_ofi = 0.0
         self._last_imbalance = 0.0
-        self._last_signal_side = ""
-        self._last_signal_event_us = 0
         self.stats = BinanceSignalStats()
 
     def snapshot(self) -> BinanceSignalSnapshot:
         return BinanceSignalSnapshot(
             ticks=self._count,
-            last_event_time_us=self._last_event_time_us,
-            last_update_id=self._last_update_id,
             last_microprice=self._last_microprice,
             last_ofi=self._last_ofi,
             last_imbalance=self._last_imbalance,
@@ -148,25 +128,6 @@ class BinanceSignalEngine:
     @property
     def strike(self) -> float:
         return self._cfg.strike
-
-    @property
-    def last_microprice(self) -> float:
-        return self._last_microprice
-
-    @property
-    def max_lag_us(self) -> int:
-        return self._cfg.max_lag_us
-
-    def last_microprice_age_us(self) -> int:
-        if self._last_event_time_us <= 0:
-            return 2**63 - 1
-        age = self._now_us() - self._last_event_time_us
-        return age if age > 0 else 0
-
-    def fresh_microprice(self, max_age_us: int) -> float:
-        if max_age_us <= 0 or self._last_microprice <= 0.0:
-            return 0.0
-        return self._last_microprice if self.last_microprice_age_us() <= max_age_us else 0.0
 
     def set_strike(self, strike: float, *, reset_window: bool = True) -> None:
         self._cfg = replace(self._cfg, strike=float(strike))
@@ -181,11 +142,6 @@ class BinanceSignalEngine:
             self._ofis[i] = 0.0
         self._cursor = 0
         self._count = 0
-        self.reset_signal_cooldown()
-
-    def reset_signal_cooldown(self) -> None:
-        self._last_signal_side = ""
-        self._last_signal_event_us = 0
 
     def on_tick(self, tick: BinanceTick) -> BinanceSignal | None:
         return self.on_tick_fields(
@@ -254,7 +210,7 @@ class BinanceSignalEngine:
         if self._cfg.strike <= 0.0:
             return None
 
-        return self._maybe_signal(event_time_us, update_id, microprice, ofi, imbalance, spread)
+        return self._maybe_signal(event_time_us, update_id, microprice, imbalance)
 
     def _compute_ofi(self, bid: float, ask: float, bid_qty: float, ask_qty: float) -> float:
         if self._count == 0:
@@ -281,9 +237,7 @@ class BinanceSignalEngine:
         event_time_us: int,
         update_id: int,
         microprice: float,
-        ofi: float,
         imbalance: float,
-        spread: float,
     ) -> BinanceSignal | None:
         if self._count < 2:
             return None
@@ -316,18 +270,6 @@ class BinanceSignalEngine:
         elif ofi_sum > -self._cfg.min_abs_ofi or imbalance > -self._cfg.min_imbalance:
             return None
 
-        if self._cfg.signal_cooldown_us > 0 and self._last_signal_event_us > 0:
-            elapsed = event_time_us - self._last_signal_event_us
-            if elapsed < self._cfg.signal_cooldown_us and (
-                self._cfg.cooldown_side_agnostic or side == self._last_signal_side
-            ):
-                return None
-
-        strength = min(abs(move) / max(self._cfg.min_abs_move, 1e-9), 10.0)
-        strength += min(abs(ofi_sum) / max(self._cfg.min_abs_ofi, 1e-9), 10.0)
-        strength += min(abs(imbalance) / max(self._cfg.min_imbalance, 1e-9), 10.0)
-        self._last_signal_side = side
-        self._last_signal_event_us = event_time_us
         self.stats.signals += 1
         return BinanceSignal(
             side=side,
@@ -336,10 +278,6 @@ class BinanceSignalEngine:
             update_id=update_id,
             microprice=microprice,
             move=move,
-            ofi=ofi_sum,
-            imbalance=imbalance,
-            spread=spread,
-            strength=strength,
             sigma_px=sigma_px,
             strike=self._cfg.strike,
         )

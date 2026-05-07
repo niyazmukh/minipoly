@@ -10,7 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from fast_order_submitter import FastOrderTemplate
 from hot_path_engine import HotPathGuard
-from template_armory import ArmoryConfig, TemplateArmory, ceil_to_2dp, ceil_to_tick, floor_to_2dp
+from template_armory import ArmoryConfig, TemplateArmory, ceil_to_tick
 
 
 class _Engine:
@@ -64,8 +64,6 @@ class _DivergingBuilder:
 def test_price_helpers_align_to_tick_and_2dp() -> None:
     assert ceil_to_tick(Decimal("0.521"), Decimal("0.01")) == Decimal("0.53")
     assert ceil_to_tick(Decimal("0.520"), Decimal("0.01")) == Decimal("0.52")
-    assert floor_to_2dp(Decimal("19.999")) == Decimal("19.99")
-    assert ceil_to_2dp(Decimal("1.49254")) == Decimal("1.50")
 
 
 def test_quote_update_prepares_and_arms_template() -> None:
@@ -399,7 +397,7 @@ class _CanonicalizingBuilder:
 
 def test_identical_quote_does_not_rearm_when_builder_returns_canonical_size() -> None:
     """Regression: identical quotes must not rearm just because
-    canonical size differs from raw ceil_to_2dp target."""
+    canonical size differs from the raw notional target."""
     async def _run() -> None:
         engine = _Engine()
         # ask=0.48 → buy_limit=0.48 → raw=ceil_to_2dp(10/0.48)=20.84
@@ -446,7 +444,7 @@ def test_identical_quote_does_not_rearm_when_builder_returns_canonical_size() ->
     ],
 )
 def test_armory_passes_canonical_size_to_builder(ask: Decimal, expected_size: Decimal) -> None:
-    """Armory must pass canonical BUY size (not raw ceil_to_2dp) to builder."""
+    """Armory must pass canonical BUY size, not raw notional size, to builder."""
     async def _run() -> None:
         builder = _CanonicalizingBuilder(expected_size=expected_size)
         armory = TemplateArmory(
@@ -472,7 +470,7 @@ def test_armory_passes_canonical_size_to_builder(ask: Decimal, expected_size: De
 
 
 def test_armory_min_size_checked_before_canonicalization() -> None:
-    """min_size gate applies to raw ceil_to_2dp, not post-canonical size."""
+    """min_size gate applies to raw notional size, not post-canonical size."""
     engine = _Engine()
     builder = _Builder()
     # For ask=0.50: raw_size=20.00, which is >= 5.0. Should arm.

@@ -68,7 +68,7 @@ scp -i $KEY -o StrictHostKeyChecking=no -o UserKnownHostsFile=NUL *.py .env.poly
 5. Verify deployed file count and env:
 
 ```powershell
-ssh -i $KEY -o StrictHostKeyChecking=no -o UserKnownHostsFile=NUL $HOST "cd $REMOTE && printf 'py_count=' && find . -maxdepth 1 -type f -name '*.py' | wc -l && grep -E 'MINIMAL_MAX_ASK|MINIMAL_MIN_BUY_LIMIT|MINIMAL_MAX_BUY_LIMIT|MINIMAL_ENTRY_SLIPPAGE|MINIMAL_TAKE_PROFIT_BPS|MINIMAL_EXIT_FAK_ATTEMPTS' .env.poly && sha256sum .env.poly"
+ssh -i $KEY -o StrictHostKeyChecking=no -o UserKnownHostsFile=NUL $HOST "cd $REMOTE && printf 'py_count=' && find . -maxdepth 1 -type f -name '*.py' | wc -l && grep -E 'MINIMAL_MIN_BUY_LIMIT|MINIMAL_MAX_BUY_LIMIT|MINIMAL_ENTRY_SLIPPAGE|MINIMAL_TAKE_PROFIT_BPS|MINIMAL_EXIT_FAK_ATTEMPTS' .env.poly && sha256sum .env.poly"
 Get-FileHash -Algorithm SHA256 .env.poly
 ```
 
@@ -114,24 +114,18 @@ python docs\analyze_bot_logs.py $LOCAL_LOG --context 3
 ## Current EC2 Env Baseline
 
 ```env
-MINIMAL_MAX_ASK=0.70
 MINIMAL_MIN_BUY_LIMIT=0.25
 MINIMAL_MAX_BUY_LIMIT=0.70
 MINIMAL_DECISION_MIN_TTE_US=45000000
 MINIMAL_USDC_PER_TRADE=1.01
 MINIMAL_ENTRY_SLIPPAGE=0.03
-MINIMAL_STOP_LOSS_BPS=0
 MINIMAL_TAKE_PROFIT_BPS=1000
 MINIMAL_DECISION_MIN_EDGE=0.05
 MINIMAL_PROB_GAMMA_MOVE=0.5
 MINIMAL_PROB_SIGMA_FLOOR_USD=2.0
 MINIMAL_PROB_SIGMA_SCALE=1.5
-MINIMAL_PROB_USE_LEGACY=false
 MINIMAL_LOG_LEVEL=INFO
-MINIMAL_ENTRY_ORDER_TYPE=FAK
-MINIMAL_EXIT_ORDER_TYPE=FAK
 MINIMAL_EXIT_FAK_ATTEMPTS=3
-MINIMAL_ALLOW_RESTING_ORDERS=false
 MINIMAL_MAX_CONCURRENT_POSITIONS=3
 MINIMAL_MAX_NOTIONAL_OVERRUN=0.01
 MINIMAL_MAX_NOTIONAL_OVERRUN_BPS=0
@@ -141,7 +135,7 @@ MINIMAL_MAX_NOTIONAL_OVERRUN_BPS=0
 
 - Entry orders are FAK.
 - Exit orders are FAK with multi-attempt bursts (`MINIMAL_EXIT_FAK_ATTEMPTS=3`).
-- No resting exit dependence. GTC/GTD exits are legacy behavior and should not be reintroduced.
+- No resting orders in the autonomous runtime.
 - `deferExec: false` is set on every order body.
 - Max positions means concurrent asset positions, not dollars or shares.
 - Sell inventory is WSS/user-channel tracker inventory floored to the tradable 0.01 share quantum.

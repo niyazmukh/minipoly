@@ -31,13 +31,6 @@ _VALID_TRADE_TRANSITIONS: dict[str, set[str]] = {
 _DEBUG_USER_CHANNEL = os.getenv("MINIMAL_DEBUG_USER_CHANNEL", "").strip().lower() in {"1", "true", "yes", "on"}
 
 
-def _safe_print(line: str) -> None:
-    try:
-        print(line)
-    except Exception:
-        pass
-
-
 def _hot_print(line: str) -> None:
     # Per-event hot-path observability is opt-in only. By default the user
     # channel does not write to stdout while a trade is being processed.
@@ -180,9 +173,7 @@ class LocalOrderTracker:
         "trades",
         "pending_submits",
         "owned_by_asset",
-        "settled_by_asset",
         "cost_by_asset",
-        "_underflow_assets",
         "_current_run_only",
         "_submit_seq",
         "_order_to_submit",
@@ -194,9 +185,7 @@ class LocalOrderTracker:
         self.trades: dict[str, TradeState] = {}
         self.pending_submits: dict[str, PendingSubmit] = {}
         self.owned_by_asset: dict[str, Decimal] = {}
-        self.settled_by_asset: dict[str, Decimal] = {}
         self.cost_by_asset: dict[str, Decimal] = {}
-        self._underflow_assets: set[str] = set()
         self._current_run_only = bool(current_run_only)
         self._submit_seq = 0
         self._order_to_submit: dict[str, str] = {}
@@ -263,9 +252,7 @@ class LocalOrderTracker:
         scope = frozenset(a for a in asset_ids if a)
         for asset_id in scope:
             self.owned_by_asset.pop(asset_id, None)
-            self.settled_by_asset.pop(asset_id, None)
             self.cost_by_asset.pop(asset_id, None)
-            self._underflow_assets.discard(asset_id)
         # Mark non-terminal orders for resolved assets as canceled-by-resolution.
         for order_id, order in list(self.orders.items()):
             if order.asset_id not in scope:
@@ -315,8 +302,8 @@ class LocalOrderTracker:
 
         Caller is responsible for choosing a window large enough that a
         server-accepted order would have surfaced via WSS by then. Returns
-        the list of expired submit_ids so the caller can clear any
-        provisional reservations or buy-cycle locks tied to them.
+        the list of expired submit_ids so the caller can clear any local
+        submit-cycle state tied to them.
         """
         cutoff = float(now_ts) - max(0.0, float(max_age_s))
         expired: list[str] = []
@@ -351,33 +338,8 @@ class LocalOrderTracker:
             return True
         return False
 
-    def count_pending_entries(self) -> int:
-        """Assets with live entry submits not yet reflected in owned_by_asset.
-
-        During the WSS gap between submit-accepted and trade-CONFIRMED,
-        owned_by_asset is blind.  Counting these pending submissions prevents
-        duplicate entries when max_concurrent_positions would otherwise pass
-        a second BUY before the first trade lands.
-        """
-        pending_assets: set[str] = set()
-        for pending in self.pending_submits.values():
-            if pending.intent != "entry":
-                continue
-            if pending.status not in ("PENDING", "UNKNOWN", "CONFIRMED"):
-                continue
-            if self.owned(pending.asset_id) > 0:
-                continue
-            pending_assets.add(pending.asset_id)
-        return len(pending_assets)
-
     def owned(self, asset_id: str) -> Decimal:
         return self.owned_by_asset.get(asset_id, _DEC_ZERO)
-
-    def settled(self, asset_id: str) -> Decimal:
-        return self.settled_by_asset.get(asset_id, _DEC_ZERO)
-
-    def reserved(self, asset_id: str) -> Decimal:
-        return _DEC_ZERO
 
     def sellable(self, asset_id: str) -> Decimal:
         # MATCHED exposure is immediately sellable — waiting for CONFIRMED
@@ -411,21 +373,6 @@ class LocalOrderTracker:
         cost = self.cost_by_asset.get(asset_id, _DEC_ZERO)
         entry = cost / owned if cost > 0 else _DEC_ZERO
         return tradable, entry
-
-    # UNCALLED in production; used only by tests.  Remnant of removed buy-cycle lock.
-    def has_open_exposure(self, token_ids: set[str] | frozenset[str] | None = None) -> bool:
-        scope = token_ids if token_ids else None
-        for asset_id, value in self.owned_by_asset.items():
-            if scope is not None and asset_id not in scope:
-                continue
-            if _floor_size_to_quantum(value) > 0:
-                return True
-        for order in self.orders.values():
-            if scope is not None and order.asset_id not in scope:
-                continue
-            if order.status not in _TERMINAL_ORDER_STATUSES and _floor_size_to_quantum(order.remaining) > 0:
-                return True
-        return False
 
     def on_order_event(self, msg: dict[str, Any]) -> OrderState | None:
         order_id = str(msg.get("id") or msg.get("order_id") or "").strip()
@@ -547,7 +494,6 @@ class LocalOrderTracker:
             if not record.applied:
                 self._apply_trade(record, reverse=False)
                 record = dataclasses.replace(record, applied=True)
-            self._apply_settled_delta(record.asset_id, self._delta_for_trade(record))
             record = dataclasses.replace(record, finalized=True)
 
         if prev is not None and self._same_trade_state(prev, record):
@@ -621,9 +567,11 @@ class LocalOrderTracker:
         )
 
     # Tolerance used when binding WSS orders/trades to pending submits whose
-    # client-side response was lost (UNKNOWN status). Polymarket may round
-    # price to tick or split parent orders. We accept original_size at or
-    # above the pending size, and price within one tick.
+    # client-side response was lost (UNKNOWN status). For FAK BUYs the local
+    # template stores the limit price and limit-derived size, while WSS reports
+    # the actual execution price/size. A better BUY price can therefore produce
+    # more shares than the template size; the invariant is bounded notional, not
+    # exact shares. For SELLs, never bind a larger executed size than submitted.
     _MATCH_PRICE_TOLERANCE = Decimal("0.01")
 
     def _match_submit_from_order(self, order: OrderState, msg: dict[str, Any]) -> str:
@@ -637,7 +585,13 @@ class LocalOrderTracker:
             return ""
 
         price = _parse_dec(msg.get("price"))
-        return self._best_pending_candidate(order.asset_id, order.side, order.original_size, price)
+        return self._best_pending_candidate(
+            order.asset_id,
+            order.side,
+            order.original_size,
+            price,
+            execution=False,
+        )
 
     def _match_submit_from_trade_msg(self, taker_order_id: str, msg: dict[str, Any]) -> str:
         if taker_order_id and taker_order_id in self._order_to_submit:
@@ -649,7 +603,7 @@ class LocalOrderTracker:
         price = _parse_dec(msg.get("price"))
         if not asset_id or not side:
             return ""
-        return self._best_pending_candidate(asset_id, side, size, price)
+        return self._best_pending_candidate(asset_id, side, size, price, execution=True)
 
     def _best_pending_candidate(
         self,
@@ -657,6 +611,8 @@ class LocalOrderTracker:
         side: str,
         order_size: Decimal,
         order_price: Decimal,
+        *,
+        execution: bool,
     ) -> str:
         candidates: list[str] = []
         for submit_id, pending in self.pending_submits.items():
@@ -666,19 +622,46 @@ class LocalOrderTracker:
                 continue
             if pending.asset_id != asset_id or pending.side != side:
                 continue
-            if pending.size > 0 and order_size > 0:
-                # Allow the venue to fill a smaller chunk than we asked for,
-                # but never bind to a strictly larger requested size.
-                if order_size > pending.size:
+            if execution:
+                if not self._pending_matches_execution(pending, order_size, order_price):
                     continue
-            if pending.price > 0 and order_price > 0:
-                diff = pending.price - order_price if pending.price > order_price else order_price - pending.price
-                if diff > self._MATCH_PRICE_TOLERANCE:
+            else:
+                if pending.size > 0 and order_size > 0 and order_size > pending.size:
                     continue
+                if pending.price > 0 and order_price > 0:
+                    diff = pending.price - order_price if pending.price > order_price else order_price - pending.price
+                    if diff > self._MATCH_PRICE_TOLERANCE:
+                        continue
             candidates.append(submit_id)
             if len(candidates) > 1:
                 return ""
         return candidates[0] if candidates else ""
+
+    def _pending_matches_execution(
+        self,
+        pending: PendingSubmit,
+        order_size: Decimal,
+        order_price: Decimal,
+    ) -> bool:
+        if pending.side == "BUY":
+            if pending.price > 0 and order_price > 0:
+                if order_price > pending.price + self._MATCH_PRICE_TOLERANCE:
+                    return False
+            if pending.size > 0 and pending.price > 0 and order_size > 0 and order_price > 0:
+                pending_notional = pending.size * pending.price
+                execution_notional = order_size * order_price
+                if execution_notional > pending_notional + self._MATCH_PRICE_TOLERANCE:
+                    return False
+            return True
+        if pending.side == "SELL":
+            if pending.size > 0 and order_size > 0:
+                if order_size > pending.size:
+                    return False
+            if pending.price > 0 and order_price > 0:
+                if order_price < pending.price - self._MATCH_PRICE_TOLERANCE:
+                    return False
+            return True
+        return True
 
     def _trade_belongs_to_current_run(self, taker_order_id: str, msg: dict[str, Any]) -> bool:
         if taker_order_id and (taker_order_id in self.orders or taker_order_id in self._order_to_submit):
@@ -702,7 +685,7 @@ class LocalOrderTracker:
             return False
         size = _parse_dec(msg.get("size"))
         price = _parse_dec(msg.get("price"))
-        sid = self._best_pending_candidate(asset_id, side, size, price)
+        sid = self._best_pending_candidate(asset_id, side, size, price, execution=True)
         if not sid:
             return False
         if taker_order_id:
@@ -719,39 +702,4 @@ class LocalOrderTracker:
         if updated > 0:
             self.owned_by_asset[asset_id] = updated
             return
-        if updated < 0 and asset_id not in self._underflow_assets:
-            self._underflow_assets.add(asset_id)
-            if _DEBUG_USER_CHANNEL:
-                _hot_print(
-                    f"warning asset={asset_id} inventory underflow while applying delta={delta}; "
-                    "tracker likely started after positions were already open"
-                )
         self.owned_by_asset.pop(asset_id, None)
-
-    def _apply_settled_delta(self, asset_id: str, delta: Decimal) -> None:
-        if not asset_id or delta == 0:
-            return
-        current = self.settled_by_asset.get(asset_id, _DEC_ZERO)
-        updated = current + delta
-        if updated > 0:
-            self.settled_by_asset[asset_id] = updated
-        else:
-            self.settled_by_asset.pop(asset_id, None)
-
-    def dump_positions(self) -> None:
-        if not self.owned_by_asset and not self.settled_by_asset:
-            _safe_print("positions: empty")
-            return
-        _safe_print("positions:")
-        assets = set(self.owned_by_asset.keys()) | set(self.settled_by_asset.keys())
-        for asset_id in sorted(assets):
-            owned = self.owned(asset_id)
-            settled = self.settled(asset_id)
-            sellable = self.sellable(asset_id)
-            avg_entry = self.average_entry_price(asset_id)
-            _safe_print(
-                f"  asset={asset_id} owned={owned} settled={settled} sellable={sellable} "
-                f"avg_entry={avg_entry}"
-            )
-
-

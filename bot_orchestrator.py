@@ -6,10 +6,9 @@ from collections import deque
 from decimal import Decimal, InvalidOperation, ROUND_CEILING, ROUND_DOWN
 from typing import Any, Callable, Protocol
 
-from basis_estimator import BasisEstimator
 from binance_signal_engine import BinanceSignalConfig, BinanceSignalEngine
 from exit_policy import ExitDecision, ExitPolicyConfig, OpenPosition, decide_exit, take_profit_decision
-from log_utils import full_trace_enabled
+from log_utils import full_trace_enabled, log_hot_path_result
 from order_tracker import LocalOrderTracker, TradeState
 from polymarket_market_feed import apply_market_event
 from runtime_state import MinimalMarket, MinimalRuntimeState
@@ -31,7 +30,6 @@ ANCHOR_BUFFER_HORIZON_US = 10_000_000
 CONTEXT_EVENT_TYPE = "minimal_market_context"
 INACTIVE_EVENT_TYPE = "minimal_market_inactive"
 
-_DEC_TWO = Decimal("2")
 _DEC_ZERO = Decimal("0")
 _DEC_ONE = Decimal("1")
 _DEC_HALF = Decimal("0.50")
@@ -123,8 +121,6 @@ class MinimalBotOrchestrator:
         "_exit_cfg",
         "_exit_armory",
         "_tracker",
-        "_basis",
-        "_polymarket_strike",
         "_exit_task",
         "_exit_dirty",
         "_last_signal_status_ns",
@@ -143,7 +139,6 @@ class MinimalBotOrchestrator:
         signal_cfg: BinanceSignalConfig,
         decision_cfg: SignalDecisionConfig,
         now_s: Callable[[], float],
-        basis_estimator: BasisEstimator | None = None,
     ) -> None:
         self.state = state
         self.signal_engine = BinanceSignalEngine(signal_cfg)
@@ -154,8 +149,6 @@ class MinimalBotOrchestrator:
         self._exit_cfg: ExitPolicyConfig | None = None
         self._exit_armory: _ExitArmory | None = None
         self._tracker: LocalOrderTracker | None = None
-        self._basis = basis_estimator
-        self._polymarket_strike: float = 0.0
         self._exit_task: asyncio.Task[None] | None = None
         self._exit_dirty: bool = False
         self._last_signal_status_ns = 0
@@ -174,8 +167,7 @@ class MinimalBotOrchestrator:
         self._exit_cfg = cfg
         self._exit_armory = exit_armory
         self._tracker = tracker
-        self._sync_position_from_tracker()
-        self._prepare_exit_from_state()
+        self._prepare_exit_from_tracker()
 
     async def on_market_event(self, event: dict[str, Any]) -> bool:
         et = str(event.get("event_type") or event.get("eventType") or event.get("type") or "").strip().lower()
@@ -191,8 +183,7 @@ class MinimalBotOrchestrator:
         changed = await apply_market_event(event, self.state, self._armory, arm_entries=arm_entries)
         if changed:
             self._sync_hot_path_exposure_scope()
-            self._update_basis_from_state()
-            self._prepare_exit_from_state()
+            self._prepare_exit_from_tracker()
         return changed
 
     async def on_user_event(self, event: dict[str, Any]) -> bool:
@@ -203,9 +194,14 @@ class MinimalBotOrchestrator:
         if kind == "trade":
             changed = self._tracker.on_trade_event(event)
             if isinstance(changed, TradeState):
-                self._sync_position_from_tracker(changed.asset_id)
-                if changed.side == "BUY" and changed.applied and changed.status == "MATCHED":
-                    self._prepare_exit_from_state()
+                if changed.applied and changed.status == "MATCHED":
+                    await self._on_wss_inventory_match(changed)
+                if (
+                    changed.side == "BUY"
+                    and changed.applied
+                    and self._tracker.sellable(changed.asset_id) > 0
+                ):
+                    self._prepare_exit_from_tracker()
                     # Schedule exit evaluation off the user-WS recv loop. The
                     # signing+HTTP cost of arm_exit must not block dispatch
                     # of subsequent user events. Single-flight: if an exit
@@ -215,6 +211,16 @@ class MinimalBotOrchestrator:
         elif kind == "order" or kind in {"placement", "update", "cancellation"}:
             changed = self._tracker.on_order_event(event)
         return changed is not None
+
+    async def _on_wss_inventory_match(self, changed: TradeState) -> None:
+        side = self.state.side_for_token(changed.asset_id)
+        if not side:
+            return
+        retire = getattr(self._armory, "retire", None)
+        if callable(retire):
+            retire(side)
+        if changed.side == "SELL":
+            await self._rearm_entry_from_latest_quote(side)
 
     def _schedule_exit_evaluation(self) -> None:
         if self._exit_armory is None or self._tracker is None:
@@ -294,9 +300,16 @@ class MinimalBotOrchestrator:
         )
         if decision.action == "BUY":
             result = await self._hot_path.on_signal(decision.side)
-            _LOG.warning("entry_hot_path_result side=%s result=%r", decision.side, result)
+            log_hot_path_result(
+                _LOG,
+                "entry_hot_path_result",
+                side=decision.side,
+                token_id=decision.token_id,
+                result=result,
+            )
             attempted_submit = _result_attempted_submit(result)
-            if attempted_submit and _result_reason(result) == "submit_failed":
+            result_reason = _result_reason(result)
+            if attempted_submit and result_reason in {"submitted", "submit_failed"}:
                 retire = getattr(self._armory, "retire", None)
                 if callable(retire):
                     retire(decision.side)
@@ -353,7 +366,13 @@ class MinimalBotOrchestrator:
             if not armed:
                 return
             sell_result = await self._hot_path.on_signal(exit_decision.signal)
-            _LOG.warning("immediate_exit_hot_path_result side=%s result=%r", decision.side, sell_result)
+            log_hot_path_result(
+                _LOG,
+                "immediate_exit_hot_path_result",
+                side=decision.side,
+                token_id=decision.token_id,
+                result=sell_result,
+            )
             retire = getattr(self._exit_armory, "retire", None)
             if callable(retire):
                 retire(exit_decision.signal)
@@ -424,19 +443,17 @@ class MinimalBotOrchestrator:
             return ExitDecision("HOLD", "exit_policy_unconfigured")
         if not self.state.trading_active:
             return ExitDecision("HOLD", "market_inactive")
-        if getattr(self._hot_path, "_in_flight_sell", False):
-            return ExitDecision("HOLD", "sell_in_flight")
         market = self.state.market
         tte_us = int(max(0.0, (market.end_ts - self._now_s()) if market is not None else 0.0) * 1_000_000)
-        now_ns = self.state.now_ns()
-        # Iterate ALL positions — not just state.position. Each position is
-        # evaluated independently so position B doesn't wait behind position A.
+        # Iterate all tracker-owned positions so position B doesn't wait
+        # behind position A.
         owned_map = getattr(self._tracker, "owned_by_asset", {})
         candidate_assets = list(owned_map.keys())
         if not candidate_assets:
             if self._tracker.has_unconfirmed_submits(intent="entry"):
                 self._maybe_log_exit_diag("no_owned_assets_after_entry_submit")
             return ExitDecision("HOLD", "no_sellable_position")
+        first_sell: ExitDecision | None = None
         for asset_id in candidate_assets:
             owned, entry = self._tracker.position_size_and_entry(asset_id)
             if owned <= 0 or entry <= 0:
@@ -457,13 +474,11 @@ class MinimalBotOrchestrator:
                 token_id=asset_id,
                 entry_price=entry,
                 size=owned,
-                opened_ns=0,
             )
             decision = decide_exit(
                 position,
                 quote,
                 self._exit_cfg,
-                now_ns=now_ns,
                 tte_us=tte_us,
                 sellable_size=sellable_size,
             )
@@ -478,18 +493,26 @@ class MinimalBotOrchestrator:
                     quote_age_us=self.state.quote_age_us(asset_id),
                 )
                 continue
+            if first_sell is None:
+                first_sell = decision
             armed = await self._exit_armory.arm_exit(decision, quote_ts_ns=quote.ts_ns)
             attempted_submit = False
             if armed:
                 result = await self._hot_path.on_signal(decision.signal)
-                _LOG.warning("exit_hot_path_result side=%s result=%r", decision.side, result)
+                log_hot_path_result(
+                    _LOG,
+                    "exit_hot_path_result",
+                    side=decision.side,
+                    token_id=decision.token_id,
+                    result=result,
+                )
                 attempted_submit = _result_attempted_submit(result)
             if attempted_submit:
                 retire = getattr(self._exit_armory, "retire", None)
                 if callable(retire):
                     retire(decision.signal)
-            if attempted_submit:
-                return decision
+        if first_sell is not None:
+            return first_sell
         return ExitDecision("HOLD", "no_sellable_position")
 
     # ---- market context plumbing -----------------------------------------
@@ -511,9 +534,10 @@ class MinimalBotOrchestrator:
         rotated = prior is None or prior.condition_id != market.condition_id or prior.slug != market.slug
 
         self.state.set_market(market)
-        self._polymarket_strike = market.strike
 
         if rotated:
+            if self._tracker is not None and prior is not None:
+                self._tracker.release_market_inventory({prior.yes_token_id, prior.no_token_id})
             # Drop stale entry templates and pending sign tasks on rotation;
             # also clear hot-path armed state and exposure lock for this scope.
             self._armory.reset()
@@ -654,75 +678,9 @@ class MinimalBotOrchestrator:
                 {prior_market.yes_token_id, prior_market.no_token_id}
             )
 
-    def _update_basis_from_state(self) -> None:
-        # Telemetry-only: BasisEstimator no longer feeds back into the signal
-        # threshold. The signal engine's strike is anchored once per market
-        # rotation (see _anchor_strike_on_rotation) and is immutable until
-        # the next rotation.
-        if self._basis is None or self._polymarket_strike <= 0.0:
-            return
-        market = self.state.market
-        if market is None:
-            return
-        yes_quote = self.state.quotes.get(market.yes_token_id)
-        if yes_quote is None or yes_quote.bid <= 0 or yes_quote.ask <= 0:
-            return
-        yes_mid = float((yes_quote.bid + yes_quote.ask) / _DEC_TWO)
-        binance_micro = self.signal_engine.last_microprice
-        if binance_micro <= 0.0:
-            return
-        max_age_us = self.signal_engine.max_lag_us
-        if max_age_us > 0 and self.signal_engine.last_microprice_age_us() > max_age_us:
-            return
-        tte_us = int(max(0.0, market.end_ts - self._now_s()) * 1_000_000)
-        self._basis.update(
-            binance_microprice=binance_micro,
-            yes_mid=yes_mid,
-            strike=self._polymarket_strike,
-            tte_us=tte_us,
-        )
+    # ---- exit pre-arm ----------------------------------------------------
 
-    # ---- position sync ---------------------------------------------------
-
-    def _sync_position_from_tracker(self, token_id: str = "") -> None:
-        if self._tracker is None:
-            return
-        market = self.state.market
-        if market is None:
-            return
-        candidates = (token_id,) if token_id else (market.yes_token_id, market.no_token_id)
-        for asset_id in candidates:
-            side = self.state.side_for_token(asset_id)
-            if not side:
-                continue
-            owned, entry = self._tracker.position_size_and_entry(asset_id)
-            if owned <= 0:
-                if self.state.position is not None and self.state.position.token_id == asset_id:
-                    self.state.clear_position()
-                continue
-            if entry <= 0:
-                continue
-            current = self.state.position
-            if (
-                current is not None
-                and current.token_id == asset_id
-                and current.size == owned
-                and current.entry_price == entry
-            ):
-                return  # no-op when tracker matches state
-            opened_ns = current.opened_ns if current is not None and current.token_id == asset_id else self.state.now_ns()
-            self.state.set_position(
-                OpenPosition(
-                    side=side,
-                    token_id=asset_id,
-                    entry_price=entry,
-                    size=owned,
-                    opened_ns=opened_ns,
-                )
-            )
-            return
-
-    def _prepare_exit_from_state(self) -> None:
+    def _prepare_exit_from_tracker(self) -> None:
         if self._exit_cfg is None or self._exit_armory is None or self._tracker is None:
             return
         if not self.state.trading_active:
@@ -741,11 +699,10 @@ class MinimalBotOrchestrator:
                 token_id=asset_id,
                 entry_price=entry,
                 size=owned,
-                opened_ns=0,
             )
             # Use take_profit_decision so the pre-armed template matches what
             # evaluate_exit will request — _same_exit returns True and arm_exit
-            # skips re-signing.  Expiry/stop-loss override at evaluation time.
+            # skips re-signing. Expiry can still override at evaluation time.
             self._exit_armory.prepare_exit(
                 take_profit_decision(position, quote, self._exit_cfg, owned),
                 quote_ts_ns=quote.ts_ns,

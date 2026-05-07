@@ -52,7 +52,7 @@ async def _dispatch_user_event(ev: dict[str, Any], on_event: EventCallback | Non
 
 
 def _emit_status(line: str, *, on_event: EventCallback | None = None) -> None:
-    _LOG.warning("user_ws_status %s", line)
+    _LOG.info("user_ws_status %s", line)
     if on_event is None:
         print_log(line)
 
@@ -132,7 +132,7 @@ async def listen_forever(
     while True:
         try:
             api_key_label = _redact_api_key(api_key)
-            _LOG.warning("user_ws_connecting url=%s api_key=%s", ws_url, api_key_label)
+            _LOG.info("user_ws_connecting url=%s api_key=%s", ws_url, api_key_label)
 
             async with websockets.connect(
                 ws_url,
@@ -142,7 +142,7 @@ async def listen_forever(
                 close_timeout=2,
                 max_queue=8192,
             ) as ws:
-                _LOG.warning("user_ws_connected url=%s api_key=%s", ws_url, api_key_label)
+                _LOG.info("user_ws_connected url=%s api_key=%s", ws_url, api_key_label)
                 auth_msg = {
                     "auth": {
                         "apiKey": api_key,
@@ -152,7 +152,7 @@ async def listen_forever(
                     "type": "user",
                 }
                 await ws.send(orjson.dumps(auth_msg).decode("utf-8"))
-                _LOG.warning("user_ws_auth_sent type=user api_key=%s", api_key_label)
+                _LOG.info("user_ws_auth_sent type=user api_key=%s", api_key_label)
                 _emit_status("user channel subscribed", on_event=on_event)
 
                 backoff = 0.25
@@ -178,7 +178,7 @@ async def listen_forever(
                             if et in {"order", "trade"}:
                                 await _dispatch_user_event(ev, on_event)
                             else:
-                                _LOG.warning("user_ws_control_payload event_type=%s", et or "<missing>")
+                                _LOG.info("user_ws_control_payload event_type=%s", et or "<missing>")
                 finally:
                     ping_task.cancel()
                     with suppress(asyncio.CancelledError):

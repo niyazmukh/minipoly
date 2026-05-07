@@ -102,12 +102,27 @@ Key is at `.ssh_tmp/poly-buy-sell.pem` (repo-relative). EC2 host: `34.244.40.198
 - `hot_path_engine.py` — guard checks, submit, multi-position, max_concurrent_positions=3
 - `fast_order_submitter.py` — raw POST /order with L2 auth, V2 rounding patch, deferExec: false
 - `order_tracker.py` — user-WSS confirmed inventory, sellable vs owned, exposure tracking
-- `exit_policy.py` / `exit_armory.py` — take-profit / expiry exits (stop-loss disabled)
-- `runtime_state.py` — active market, quotes, position state
+- `exit_policy.py` / `exit_armory.py` — take-profit / expiry FAK exits only
+- `runtime_state.py` — active market and quotes only; inventory/positions come from `order_tracker.py`
 - `runtime_wiring.py` — builds and connects runtime objects
 
 ## Key Design Rules
 
+- **Evidence first**: source, live logs, Graphify, and actual runtime behavior beat prior AI summaries. Treat Graphify inferred edges as hypotheses until source proves them.
+- **Occam's razor**: delete complexity unless it protects against a real live failure. Prefer deletion over abstraction and one source of truth over reconciliation logic.
+- **No monkey job**: no monkey patches, no hidden SDK global mutation, no broad rewrites that disguise clutter.
+- **Hot path discipline**: Binance tick to BUY submit must cross the fewest possible functions and gates.
+- **FAK rejection is cheap**: harmless BUY/SELL no-match or SELL balance rejection should not be locally over-protected.
+- **WSS authority**: user WSS trades are inventory truth. HTTP matched response is useful for immediate exit only, not final inventory.
+- **UNKNOWN submit stays**: HTTP timeout can later bind through user WSS, so pending UNKNOWN matching is real risk control.
+- **BUY duplicate protection stays only where it prevents real exposure**: `buy_in_flight`, same-token/pending exposure cap, and max concurrent exposure.
+- **SELL must not be locally over-gated**: no SELL reservations, balance locks, cooldowns, or in-flight blockers.
+- **Decimal precision is non-negotiable**: venue-facing signed bodies must be validated locally before submit.
+- **Analyzer is offline**: useful for logs, not bot core, not runtime graph. Keep `docs/` excluded unless explicitly graphing docs.
+- **Grep after every refactor**: propagate removals through source, docs, env, tests, and graph; stale symbols are bugs.
+- **Docs must not lie**: active docs describe actual runtime, not old intended architecture.
+- **EC2 deploys are runtime-only**: no tests, no docs, no generated artifacts unless explicitly requested.
+- **Runtime changes require validation**: `py_compile`, focused tests where possible, stale-symbol grep, Graphify update, and live log evidence when running EC2.
 - **No full SDK `create_and_post_order()` on signal** — pre-signed templates + fresh L2 headers
 - **No subprocess wrappers, no JSON log writes on hot path, no raw event pretty-printing**
 - **Sell inventory = MATCHED** (immediately sellable, no CONFIRMED wait), floored to 0.01 share quantum. Evidence: `order_tracker.py` `sellable()` uses MATCHED.
@@ -116,7 +131,8 @@ Key is at `.ssh_tmp/poly-buy-sell.pem` (repo-relative). EC2 host: `34.244.40.198
 - **`MINIMAL_USDC_PER_TRADE >= 1.01`** — 1.00 serializes below venue $1 minimum
 - **Startup fails closed** unless `MINIMAL_MIN_BUY_LIMIT` and `MINIMAL_DECISION_MIN_TTE_US` are set
 - **deferExec: false** on every order body
-- **No local SELL reservation or balance cooldown** — FAK exits fire burst immediately; venue balance is the authoritative gate. Evidence: `bot_orchestrator.py` zero balance-cooldown code.
+- **No Binance signal debounce** — every valid tick-level signal reaches decision/submit; duplicate exposure is handled by `HotPathEngine` pending-submit and inventory guards.
+- **No local SELL balance lock or cooldown** — FAK exits fire burst immediately; venue balance is the authoritative gate. Evidence: `bot_orchestrator.py` zero balance-cooldown code.
 
 ## Key Env Vars
 
@@ -129,17 +145,11 @@ Key is at `.ssh_tmp/poly-buy-sell.pem` (repo-relative). EC2 host: `34.244.40.198
 | `MINIMAL_DECISION_MIN_EDGE` | 0.05 | Universal edge floor |
 | `MINIMAL_ENTRY_SLIPPAGE` | 0.03 | Added to entry edge math and BUY limit |
 | `MINIMAL_TAKE_PROFIT_BPS` | 1000 | FAK SELL target over entry price |
-| `MINIMAL_STOP_LOSS_BPS` | 0 | Disabled |
 | `MINIMAL_PROB_SIGMA_FLOOR_USD` | 2.0 | Volatility floor for prob model |
 | `MINIMAL_PROB_SIGMA_SCALE` | 1.5 | Volatility scale multiplier |
 | `MINIMAL_PROB_GAMMA_MOVE` | 0.5 | Weight of momentum in drift |
-| `MINIMAL_PROB_MIN_PROB` | 0.55 | Probability floor (expensive tokens only) |
-| `MINIMAL_PROB_USE_LEGACY` | false | Brownian model (not legacy heuristic) |
 | `POLY_ALLOW_LIVE_ORDERS` | true | Required for live trading |
-| `MINIMAL_REQUIRE_CALIBRATED_MODEL` | false | Set true when model is fitted |
-| `MINIMAL_ENTRY_ORDER_TYPE` | FAK | Only FAK supported; `_order_type_env` rejects non-FAK. Evidence: `minimal_live_bot.py:128-129` |
 | `MINIMAL_EXIT_FAK_ATTEMPTS` | 3 | FAK exit burst count. Evidence: `exit_policy.py:32`, `minimal_live_bot.py:314` |
-| `MINIMAL_SIGNAL_COOLDOWN_US` | 1000000 | 1s debounce between same-side BUY signals. Evidence: `binance_signal_engine.py:319` |
 | `MINIMAL_MAX_CONCURRENT_POSITIONS` | 3 | Cap concurrent entries |
 
 ## Testing

@@ -116,47 +116,6 @@ def test_template_requires_body_bytes() -> None:
         FastOrderTemplate(name="entry", token_id="t", side="BUY", price=0.5, size=1.0, body_bytes=b"")
 
 
-def test_cancel_orders_uses_delete_orders_with_compact_body() -> None:
-    class _Resp:
-        status = 200
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *_args):
-            return None
-
-        async def read(self) -> bytes:
-            return b'[{"canceled":"oid-1"}]'
-
-    class _Session:
-        def __init__(self) -> None:
-            self.calls = []
-
-        def delete(self, path, *, data, headers):
-            self.calls.append((path, data, headers))
-            return _Resp()
-
-    session = _Session()
-    signer = HeaderSigner(
-        address="0xabc",
-        api_key="api-key",
-        api_passphrase="pass",
-        api_secret=_secret(),
-        now_s=lambda: 1234,
-    )
-    submitter = FastOrderSubmitter(session, signer)  # type: ignore[arg-type]
-
-    import asyncio
-
-    result = asyncio.run(submitter.cancel_orders(["oid-1", "oid-2"]))
-
-    assert result == [{"canceled": "oid-1"}]
-    assert session.calls[0][0] == "/orders"
-    assert session.calls[0][1] == b'["oid-1","oid-2"]'
-    assert session.calls[0][2]["POLY_SIGNATURE"]
-
-
 def test_submit_transport_error_returns_structured_failure() -> None:
     class _Session:
         def post(self, *_args, **_kwargs):
@@ -184,36 +143,10 @@ def test_submit_transport_error_returns_structured_failure() -> None:
     assert result["error"] == "transport_error"
 
 
-def test_cancel_transport_error_returns_structured_failure() -> None:
-    class _Session:
-        def delete(self, *_args, **_kwargs):
-            raise OSError("network down")
-
-    signer = HeaderSigner(
-        address="0xabc",
-        api_key="api-key",
-        api_passphrase="pass",
-        api_secret=_secret(),
-        now_s=lambda: 1234,
-    )
-    submitter = FastOrderSubmitter(_Session(), signer)  # type: ignore[arg-type]
-
-    import asyncio
-
-    result = asyncio.run(submitter.cancel_orders(["oid-1"]))
-
-    assert result["success"] is False
-    assert result["_http_status"] == 0
-    assert result["error"] == "transport_error"
-
-
 def test_dry_run_submitter_never_uses_http_session() -> None:
     class _Session:
         def post(self, *_args, **_kwargs):
             raise AssertionError("dry run must not POST /order")
-
-        def delete(self, *_args, **_kwargs):
-            raise AssertionError("dry run must not DELETE /orders")
 
     import asyncio
 
@@ -221,7 +154,6 @@ def test_dry_run_submitter_never_uses_http_session() -> None:
     template = FastOrderTemplate(name="entry", token_id="yes", side="BUY", price=0.5, size=1.0, body_bytes=b"{}")
 
     submitted = asyncio.run(submitter.submit(template))
-    cancelled = asyncio.run(submitter.cancel_orders(["oid-1"]))
 
     assert submitted == {
         "success": False,
@@ -232,7 +164,6 @@ def test_dry_run_submitter_never_uses_http_session() -> None:
         "price": 0.5,
         "size": 1.0,
     }
-    assert cancelled == {"success": True, "_http_status": 0, "dry_run": True, "cancelled": ["oid-1"]}
 
 
 # ── prepare_template signed-body validation ───────────────────────────────
@@ -317,12 +248,6 @@ def test_valid_sell_bodies_pass(maker: str, taker: str, expected_price: str) -> 
             order_type="GTC",
             post_only=False,
         )
-        assert template.implied_price == template.price, (
-            f"implied={template.implied_price} != price={template.price}"
-        )
-        assert template.implied_price == _floor_to_step(
-            template.implied_price, Decimal("0.01")
-        ), f"implied={template.implied_price} not tick-aligned"
         assert template.price == Decimal(expected_price), (
             f"price={template.price} != expected={expected_price}"
         )
@@ -378,7 +303,6 @@ def test_prepare_template_uses_market_tick_instead_of_global_cent_tick() -> None
 
         assert template.price == Decimal("0.011")
         assert template.size == Decimal("910.0000")
-        assert template.implied_price == Decimal("0.011")
         assert clob._calls[0]["price"] == 0.011
         assert clob._calls[0]["size"] == Decimal("910.0000")
 
@@ -494,8 +418,7 @@ def test_valid_buy_bodies_pass(price: str, maker: str, taker: str) -> None:
             order_type="FAK",
             post_only=False,
         )
-        assert template.implied_price == template.price
-        assert template.implied_price == _floor_to_step(template.implied_price, Decimal("0.01"))
+        assert template.price == _floor_to_step(template.price, Decimal("0.01"))
         # maker amount must be step-aligned
         maker_d = Decimal(maker)
         assert _floor_to_step(maker_d, Decimal("0.01")) == maker_d
